@@ -1,7 +1,4 @@
-<<<<<<< HEAD
 /target/*
 .claude/
-=======
 target/
 __pycache__/
->>>>>>> claude/linux-email-client-gtk4-uacz70
