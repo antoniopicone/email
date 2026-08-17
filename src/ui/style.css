@@ -1,0 +1,205 @@
+/* MailView — Apple Mail inspired three-pane styling.
+ *
+ * Colours are taken from libadwaita's named palette so the whole sheet follows
+ * the system light/dark preference without a second dark-mode stylesheet.
+ */
+
+/* ---------------------------------------------------------------- sidebar */
+
+.mail-sidebar {
+  background: transparent;
+}
+
+.mail-sidebar row.section-header {
+  padding: 14px 12px 4px 12px;
+  min-height: 0;
+}
+
+.mail-sidebar row.section-header label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: alpha(currentColor, 0.55);
+}
+
+.mail-sidebar row.mailbox-row {
+  padding: 5px 10px;
+  min-height: 34px;
+  border-radius: 8px;
+  margin: 1px 6px;
+}
+
+.mail-sidebar row.mailbox-row image {
+  color: @accent_color;
+  -gtk-icon-size: 16px;
+}
+
+.mail-sidebar row.mailbox-row:selected image {
+  color: inherit;
+}
+
+.mailbox-name {
+  font-size: 0.95rem;
+}
+
+.mailbox-badge {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: alpha(currentColor, 0.65);
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: alpha(currentColor, 0.12);
+}
+
+row:selected .mailbox-badge {
+  background: alpha(#ffffff, 0.25);
+  color: #ffffff;
+}
+
+.account-status {
+  font-size: 0.75rem;
+  color: alpha(currentColor, 0.5);
+}
+
+/* ----------------------------------------------------------- message list */
+
+.message-list {
+  background: transparent;
+}
+
+.message-list row {
+  padding: 9px 14px 10px 8px;
+  border-bottom: 1px solid alpha(currentColor, 0.09);
+}
+
+.message-list row:selected {
+  border-bottom-color: transparent;
+}
+
+/* Apple Mail keeps the sender line prominent and everything else quiet. */
+.msg-sender {
+  font-weight: 700;
+  font-size: 0.98rem;
+}
+
+.msg-sender.unread {
+  font-weight: 800;
+}
+
+.msg-subject {
+  font-size: 0.92rem;
+  color: alpha(currentColor, 0.92);
+}
+
+.msg-subject.unread {
+  font-weight: 600;
+}
+
+.msg-snippet {
+  font-size: 0.88rem;
+  color: alpha(currentColor, 0.55);
+}
+
+.msg-date {
+  font-size: 0.82rem;
+  color: alpha(currentColor, 0.5);
+}
+
+/* Which account a message came from, shown only in the unified mailboxes.
+ * Every row carries one, so it stays quiet: a filled badge on each line would
+ * fight the sender name for attention. */
+.msg-account {
+  font-size: 0.78rem;
+  color: alpha(@accent_color, 0.85);
+}
+
+row:selected .msg-account {
+  color: alpha(#ffffff, 0.85);
+}
+
+row:selected .msg-snippet,
+row:selected .msg-date {
+  color: alpha(#ffffff, 0.8);
+}
+
+/* The blue dot marking an unread message. */
+.unread-dot {
+  background: @accent_bg_color;
+  border-radius: 999px;
+  min-width: 9px;
+  min-height: 9px;
+}
+
+row:selected .unread-dot {
+  background: #ffffff;
+}
+
+.msg-flag {
+  color: #e8a33d;
+  -gtk-icon-size: 13px;
+}
+
+.msg-attachment {
+  color: alpha(currentColor, 0.45);
+  -gtk-icon-size: 13px;
+}
+
+/* ----------------------------------------------------------- reading pane */
+
+.message-header {
+  padding: 16px 22px 12px 22px;
+  background: @window_bg_color;
+}
+
+.reader-subject {
+  font-size: 1.28rem;
+  font-weight: 700;
+}
+
+.reader-from {
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.reader-meta {
+  font-size: 0.85rem;
+  color: alpha(currentColor, 0.6);
+}
+
+.reader-date {
+  font-size: 0.85rem;
+  color: alpha(currentColor, 0.6);
+}
+
+.attachment-bar {
+  padding: 8px 22px;
+  border-top: 1px solid alpha(currentColor, 0.1);
+  background: alpha(currentColor, 0.03);
+}
+
+.attachment-chip {
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: alpha(currentColor, 0.09);
+  font-size: 0.85rem;
+}
+
+.attachment-chip image {
+  -gtk-icon-size: 14px;
+}
+
+/* ------------------------------------------------------------------ misc */
+
+.search-bar-wrap {
+  padding: 6px 8px;
+}
+
+.pane-heading {
+  font-weight: 700;
+}
+
+.count-label {
+  font-size: 0.8rem;
+  color: alpha(currentColor, 0.55);
+}
