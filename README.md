@@ -10,7 +10,15 @@ integrazione con gli account online già configurati in GNOME.
 
 - **Layout a tre pannelli** come Apple Mail: caselle a sinistra, elenco dei
   messaggi al centro, messaggio a destra. I pannelli si riducono in modo
-  responsive sugli schermi stretti grazie a `AdwNavigationSplitView`.
+  responsive sugli schermi stretti grazie a `AdwNavigationSplitView` e sono
+  ridimensionabili trascinandone il bordo; la larghezza scelta viene
+  ricordata alla chiusura dell'app.
+- **Cache locale dei messaggi**: l'elenco di ogni cartella e i messaggi già
+  aperti restano su disco, così la cartella mostra subito qualcosa mentre la
+  rete risponde e riaprire un messaggio non richiede un nuovo scaricamento.
+- **Caricamento lento (lazy load)**: la prima pagina di una cartella carica
+  `page_size` messaggi; scorrendo fino in fondo all'elenco ne arrivano altri
+  automaticamente, finché la cartella non è esaurita.
 - **Vista unificata** sul modello di Mail per iOS: *In entrata (tutte)* fonde
   la posta in arrivo di ogni account ordinandola per data, con scorciatoie per
   le singole caselle e le caselle intelligenti *Contrassegnati* e *Non letti*.
@@ -119,7 +127,9 @@ Esempio di `config.toml`:
 ```toml
 theme = "system"              # "system", "light" o "dark"
 use_gnome_online_accounts = true
-page_size = 100               # messaggi caricati per cartella
+page_size = 100                        # messaggi caricati per pagina (lazy load oltre)
+sidebar_width_fraction = 0.17          # larghezza del pannello caselle
+message_list_width_fraction = 0.34     # larghezza del pannello messaggi
 
 [[accounts]]
 id = "imap:info@example.it"
@@ -151,6 +161,7 @@ src/
   main.rs              avvio, opzioni da riga di comando, raccolta account
   model.rs             tipi condivisi (Account, Mailbox, MessageSummary, …)
   config.rs            impostazioni persistenti degli account manuali
+  cache.rs             cache su disco di elenchi e messaggi scaricati
   goa.rs               GNOME Online Accounts via D-Bus (zbus)
   secrets.rs           password nel portachiavi (Secret Service)
   html.rs              sanitizzazione dei corpi HTML e resa in testo
@@ -219,9 +230,8 @@ catturare l'intero schermo.
 ## Stato
 
 Funzionante per l'uso quotidiano di lettura e risposta. Non ancora
-implementati: thread di conversazione, IDLE per le notifiche push, cache
-offline dei messaggi, allegati in uscita e rimozione degli account
-dall'interfaccia.
+implementati: thread di conversazione, IDLE per le notifiche push, allegati
+in uscita e rimozione degli account dall'interfaccia.
 
 Le caselle intelligenti *Contrassegnati* e *Non letti* lavorano sulla posta in
 arrivo caricata, non su una ricerca lato server: coprono quindi i messaggi

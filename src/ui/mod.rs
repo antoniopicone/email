@@ -84,6 +84,22 @@ struct SidebarEntry {
     shortcut: bool,
 }
 
+/// Where a given account stands in a lazily-paged mailbox: how many messages
+/// have been requested so far, whether the server might still have older
+/// ones, and whether a page request is already in flight.
+#[derive(Debug, Clone, Copy)]
+struct PageState {
+    next_offset: u32,
+    has_more: bool,
+    loading: bool,
+}
+
+impl Default for PageState {
+    fn default() -> Self {
+        Self { next_offset: 0, has_more: true, loading: false }
+    }
+}
+
 /// Everything the UI needs to know that is not held by a widget.
 #[derive(Default)]
 struct State {
@@ -103,6 +119,8 @@ struct State {
     messages: Vec<MessageSummary>,
     /// Indices into `messages` that survive the current search and target.
     visible: Vec<usize>,
+    /// Lazy-paging progress per account, for the currently open target.
+    pagination: HashMap<String, PageState>,
     current_message: Option<Message>,
     search: String,
     dark: bool,
@@ -180,11 +198,16 @@ struct Widgets {
     search_bar: gtk::SearchBar,
     search_entry: gtk::SearchEntry,
     list_stack: gtk::Stack,
+    list_scroll: gtk::ScrolledWindow,
     banner: adw::Banner,
     toast_overlay: adw::ToastOverlay,
     flag_button: gtk::ToggleButton,
     action_buttons: Vec<gtk::Widget>,
     spinner: gtk::Spinner,
+    /// Mailboxes ↔ (messages | reader). Their widths are user-resizable and
+    /// persisted to config on close.
+    outer_split: adw::NavigationSplitView,
+    inner_split: adw::NavigationSplitView,
 }
 
 /// The main window and its wiring.
@@ -215,7 +238,7 @@ impl App {
         let events = backend.events();
         let backend = Rc::new(RefCell::new(backend));
 
-        let widgets = Rc::new(build_widgets(application));
+        let widgets = Rc::new(build_widgets(application, &config.borrow()));
         let app = Rc::new(Self {
             widgets: widgets.clone(),
             state: state.clone(),
@@ -329,10 +352,32 @@ impl App {
             });
         }
 
+        // Lazy-load: pull in the next page once the user scrolls to the
+        // bottom of the currently loaded messages.
+        {
+            let app = self.clone();
+            self.widgets.list_scroll.connect_edge_reached(move |_, pos| {
+                if pos == gtk::PositionType::Bottom {
+                    app.load_more();
+                }
+            });
+        }
+
         let window = self.widgets.window.clone();
         let backend = self.backend.clone();
+        let config = self.config.clone();
+        let outer_split = self.widgets.outer_split.clone();
+        let inner_split = self.widgets.inner_split.clone();
         window.connect_close_request(move |_| {
             backend.borrow().shutdown();
+            {
+                let mut config = config.borrow_mut();
+                config.sidebar_width_fraction = outer_split.sidebar_width_fraction();
+                config.message_list_width_fraction = inner_split.sidebar_width_fraction();
+                if let Err(e) = config.save() {
+                    log::warn!("could not save the window layout: {e:#}");
+                }
+            }
             glib::Propagation::Proceed
         });
     }
@@ -468,6 +513,10 @@ impl App {
 
                 if let Some(path) = pending {
                     let page_size = self.config.borrow().page_size;
+                    self.state.borrow_mut().pagination.insert(
+                        account_id.clone(),
+                        PageState { next_offset: 0, has_more: true, loading: true },
+                    );
                     self.backend.borrow().send(
                         &account_id,
                         Command::LoadMessages { mailbox: path, limit: page_size, offset: 0 },
@@ -476,19 +525,62 @@ impl App {
             }
 
             Event::Messages { account_id, mailbox, messages, append } => {
+                let page_size = self.config.borrow().page_size;
+                let count = messages.len() as u32;
                 {
                     let mut state = self.state.borrow_mut();
                     if !state.batch_is_relevant(&account_id, &mailbox) {
                         return;
                     }
-                    let bucket = state.buckets.entry(account_id).or_default();
-                    if append {
-                        bucket.extend(messages);
-                    } else {
-                        *bucket = messages;
-                        state.current_message = None;
+                    {
+                        let bucket = state.buckets.entry(account_id.clone()).or_default();
+                        if append {
+                            bucket.extend(messages);
+                        } else {
+                            *bucket = messages;
+                        }
                     }
+
+                    // A full (non-paged) reload can legitimately drop the
+                    // message that is open, e.g. it was deleted elsewhere.
+                    // But it must only close the reading pane for the
+                    // account/mailbox that was actually reloaded — a
+                    // background refresh of a different account in the
+                    // unified view must not blank out what the user is
+                    // reading.
+                    if !append {
+                        let mut clear_current = false;
+                        if let Some(current) = &state.current_message {
+                            if current.summary.account_id == account_id
+                                && current.summary.mailbox == mailbox
+                            {
+                                let uid = current.summary.uid;
+                                let present = state
+                                    .buckets
+                                    .get(&account_id)
+                                    .map(|b| b.iter().any(|m| m.uid == uid))
+                                    .unwrap_or(false);
+                                if !present {
+                                    clear_current = true;
+                                }
+                            }
+                        }
+                        if clear_current {
+                            state.current_message = None;
+                        }
+                    }
+
                     state.remerge();
+
+                    let page = state.pagination.entry(account_id.clone()).or_default();
+                    page.loading = false;
+                    page.has_more = page_size > 0 && count >= page_size;
+                    page.next_offset = if append { page.next_offset + count } else { count };
+                }
+                if !append {
+                    if let Some(bucket) = self.state.borrow().buckets.get(&account_id) {
+                        crate::cache::store_summaries(&account_id, &mailbox, bucket);
+                    }
                 }
                 self.widgets.spinner.set_visible(false);
                 self.refresh_message_list();
@@ -511,6 +603,12 @@ impl App {
                 }
                 let dark = self.state.borrow().dark;
                 self.widgets.message_view.show_message(&message, dark);
+                crate::cache::store_message(
+                    &account_id,
+                    &message.summary.mailbox,
+                    message.summary.uid,
+                    &message,
+                );
                 self.state.borrow_mut().current_message = Some(*message);
                 self.set_actions_enabled(true);
             }
@@ -789,6 +887,7 @@ impl App {
             state.buckets.clear();
             state.messages.clear();
             state.visible.clear();
+            state.pagination.clear();
             state.current_message = None;
         }
 
@@ -807,8 +906,34 @@ impl App {
         self.widgets.message_view.show_empty();
         self.widgets.spinner.set_visible(true);
         self.set_actions_enabled(false);
+        self.preload_from_cache(&target);
         self.refresh_message_list();
         self.request_messages(&target);
+    }
+
+    /// Show whatever was cached from the last time this target was open,
+    /// before the network has answered. It is fully replaced by the first
+    /// real batch that arrives, so a stale cache heals itself immediately.
+    fn preload_from_cache(self: &Rc<Self>, target: &FolderTarget) {
+        let entries: Vec<(String, String)> = match target {
+            FolderTarget::Mailbox { account_id, path } => vec![(account_id.clone(), path.clone())],
+            FolderTarget::Smart(_) => {
+                let state = self.state.borrow();
+                state
+                    .accounts
+                    .iter()
+                    .filter_map(|a| state.inbox_path(&a.id).map(|p| (a.id.clone(), p.to_string())))
+                    .collect()
+            }
+        };
+
+        let mut state = self.state.borrow_mut();
+        for (account_id, path) in entries {
+            if let Some(cached) = crate::cache::load_summaries(&account_id, &path) {
+                state.buckets.insert(account_id, cached);
+            }
+        }
+        state.remerge();
     }
 
     /// Ask the backend for whatever `target` needs. A unified target queries
@@ -816,26 +941,82 @@ impl App {
     fn request_messages(self: &Rc<Self>, target: &FolderTarget) {
         let page_size = self.config.borrow().page_size;
         let backend = self.backend.borrow();
+        let fresh_page = PageState { next_offset: 0, has_more: true, loading: true };
 
         match target {
-            FolderTarget::Mailbox { account_id, path } => backend.send(
-                account_id,
-                Command::LoadMessages { mailbox: path.clone(), limit: page_size, offset: 0 },
-            ),
+            FolderTarget::Mailbox { account_id, path } => {
+                self.state.borrow_mut().pagination.insert(account_id.clone(), fresh_page);
+                backend.send(
+                    account_id,
+                    Command::LoadMessages { mailbox: path.clone(), limit: page_size, offset: 0 },
+                );
+            }
             FolderTarget::Smart(_) => {
-                let state = self.state.borrow();
-                for account in &state.accounts {
-                    let Some(path) = state.inbox_path(&account.id) else { continue };
+                let targets: Vec<(String, String)> = {
+                    let state = self.state.borrow();
+                    state
+                        .accounts
+                        .iter()
+                        .filter_map(|a| {
+                            state.inbox_path(&a.id).map(|p| (a.id.clone(), p.to_string()))
+                        })
+                        .collect()
+                };
+                {
+                    let mut state = self.state.borrow_mut();
+                    for (account_id, _) in &targets {
+                        state.pagination.insert(account_id.clone(), fresh_page);
+                    }
+                }
+                for (account_id, path) in targets {
                     backend.send(
-                        &account.id,
-                        Command::LoadMessages {
-                            mailbox: path.to_string(),
-                            limit: page_size,
-                            offset: 0,
-                        },
+                        &account_id,
+                        Command::LoadMessages { mailbox: path, limit: page_size, offset: 0 },
                     );
                 }
             }
+        }
+    }
+
+    /// Pull in the next page for every account of the current target that
+    /// might still have older messages, called when the list is scrolled to
+    /// its bottom edge.
+    fn load_more(self: &Rc<Self>) {
+        let Some(target) = self.state.borrow().current_target.clone() else { return };
+        let page_size = self.config.borrow().page_size;
+        let backend = self.backend.borrow();
+
+        let requests: Vec<(String, String, u32)> = {
+            let mut state = self.state.borrow_mut();
+            let candidates: Vec<(String, String)> = match &target {
+                FolderTarget::Mailbox { account_id, path } => {
+                    vec![(account_id.clone(), path.clone())]
+                }
+                FolderTarget::Smart(_) => state
+                    .accounts
+                    .iter()
+                    .filter_map(|a| {
+                        state.inbox_path(&a.id).map(|p| (a.id.clone(), p.to_string()))
+                    })
+                    .collect(),
+            };
+
+            let mut requests = Vec::new();
+            for (account_id, path) in candidates {
+                let page = state.pagination.entry(account_id.clone()).or_default();
+                if page.has_more && !page.loading {
+                    page.loading = true;
+                    requests.push((account_id, path, page.next_offset));
+                }
+            }
+            requests
+        };
+
+        for (account_id, path, offset) in requests {
+            backend.send(
+                &account_id,
+                Command::LoadMessages { mailbox: path, limit: page_size, offset },
+            );
         }
     }
 
@@ -1008,10 +1189,23 @@ impl App {
         button.set_sensitive(true);
 
         let backend = self.backend.borrow();
-        backend.send(
-            &account_id,
-            Command::LoadMessage { mailbox: mailbox.clone(), uid },
-        );
+
+        // A message already downloaded once needs no second trip to the
+        // server: show the cached copy straight away.
+        match crate::cache::load_message(&account_id, &mailbox, uid) {
+            Some(cached) => {
+                let dark = self.state.borrow().dark;
+                self.widgets.message_view.show_message(&cached, dark);
+                self.state.borrow_mut().current_message = Some(cached);
+                self.set_actions_enabled(true);
+            }
+            None => {
+                backend.send(
+                    &account_id,
+                    Command::LoadMessage { mailbox: mailbox.clone(), uid },
+                );
+            }
+        }
 
         // Opening a message marks it read, the way every mail client does.
         if !seen {
@@ -1242,7 +1436,7 @@ pub fn apply_theme(preference: ThemePreference) {
 
 // ----------------------------------------------------------------- widgets
 
-fn build_widgets(application: &adw::Application) -> Widgets {
+fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
     let window = adw::ApplicationWindow::builder()
         .application(application)
         .title("Posta")
@@ -1439,14 +1633,14 @@ fn build_widgets(application: &adw::Application) -> Widgets {
     inner_split.set_content(Some(&adw::NavigationPage::new(&reader_view, "Messaggio")));
     inner_split.set_min_sidebar_width(330.0);
     inner_split.set_max_sidebar_width(460.0);
-    inner_split.set_sidebar_width_fraction(0.34);
+    inner_split.set_sidebar_width_fraction(config.message_list_width_fraction);
 
     let outer_split = adw::NavigationSplitView::new();
     outer_split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar_view, "Caselle")));
     outer_split.set_content(Some(&adw::NavigationPage::new(&inner_split, "Posta")));
     outer_split.set_min_sidebar_width(220.0);
     outer_split.set_max_sidebar_width(300.0);
-    outer_split.set_sidebar_width_fraction(0.17);
+    outer_split.set_sidebar_width_fraction(config.sidebar_width_fraction);
 
     let banner = adw::Banner::new("");
     banner.set_revealed(false);
@@ -1488,11 +1682,14 @@ fn build_widgets(application: &adw::Application) -> Widgets {
         search_bar,
         search_entry,
         list_stack,
+        list_scroll,
         banner,
         toast_overlay,
         flag_button,
         action_buttons,
         spinner,
+        outer_split,
+        inner_split,
     }
 }
 

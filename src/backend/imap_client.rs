@@ -23,8 +23,6 @@ const LIST_QUERY: &str =
 pub struct ImapClient {
     account: Account,
     session: Session,
-    /// Mailbox currently selected, so we can skip redundant SELECTs.
-    selected: Option<String>,
     delimiter: char,
 }
 
@@ -71,7 +69,6 @@ impl ImapClient {
         Ok(Self {
             account: account.clone(),
             session,
-            selected: None,
             delimiter: '/',
         })
     }
@@ -153,20 +150,19 @@ impl ImapClient {
         }
     }
 
+    /// Always re-issues SELECT, even when `mailbox` is already open.
+    ///
+    /// An earlier version skipped straight to STATUS when the mailbox was
+    /// already selected, to save a round trip. STATUS on the *currently
+    /// selected* mailbox is explicitly discouraged by RFC 3501 §6.3.10, and
+    /// some servers answer it with a stale or zero EXISTS count instead of
+    /// the real one — which made the message list "lose" every message in
+    /// the folder on a refresh. SELECT always gives an accurate count.
     fn select(&mut self, mailbox: &str) -> Result<u32> {
-        if self.selected.as_deref() == Some(mailbox) {
-            // Re-select anyway when we need a fresh EXISTS count.
-            let status = self
-                .session
-                .status(mailbox, "(MESSAGES)")
-                .with_context(|| format!("checking {mailbox}"))?;
-            return Ok(status.exists);
-        }
         let meta = self
             .session
             .select(mailbox)
             .with_context(|| format!("selecting {mailbox}"))?;
-        self.selected = Some(mailbox.to_string());
         Ok(meta.exists)
     }
 
@@ -408,8 +404,6 @@ impl ImapClient {
             .append_with_flags(&sent, raw, &[imap::types::Flag::Seen])
             .with_context(|| format!("appending the sent copy to {sent}"))?;
 
-        // APPEND can invalidate the selected mailbox on some servers.
-        self.selected = None;
         Ok(())
     }
 

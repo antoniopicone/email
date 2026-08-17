@@ -107,6 +107,12 @@ pub struct Config {
     /// How many messages to fetch per mailbox page.
     #[serde(default = "default_page_size")]
     pub page_size: u32,
+    /// Width of the mailbox sidebar, as a fraction of the window.
+    #[serde(default = "default_sidebar_width_fraction")]
+    pub sidebar_width_fraction: f64,
+    /// Width of the message list pane, as a fraction of its split view.
+    #[serde(default = "default_message_list_width_fraction")]
+    pub message_list_width_fraction: f64,
 }
 
 fn default_true() -> bool {
@@ -115,6 +121,14 @@ fn default_true() -> bool {
 
 fn default_page_size() -> u32 {
     100
+}
+
+fn default_sidebar_width_fraction() -> f64 {
+    0.17
+}
+
+fn default_message_list_width_fraction() -> f64 {
+    0.34
 }
 
 impl Config {
@@ -135,7 +149,13 @@ impl Config {
                 if path.exists() {
                     log::warn!("could not read {}: {e}; using defaults", path.display());
                 }
-                Config { use_gnome_online_accounts: true, page_size: default_page_size(), ..Default::default() }
+                Config {
+                    use_gnome_online_accounts: true,
+                    page_size: default_page_size(),
+                    sidebar_width_fraction: default_sidebar_width_fraction(),
+                    message_list_width_fraction: default_message_list_width_fraction(),
+                    ..Default::default()
+                }
             }
         }
     }
