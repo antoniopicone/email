@@ -78,17 +78,17 @@ pub enum MailboxKind {
 }
 
 impl MailboxKind {
-    /// Icon name from the Adwaita icon theme.
+    /// Name of the bundled symbolic icon for this kind of mailbox.
     pub fn icon(&self) -> &'static str {
         match self {
-            MailboxKind::Inbox => "mail-inbox-symbolic",
-            MailboxKind::Drafts => "document-edit-symbolic",
-            MailboxKind::Sent => "mail-send-symbolic",
-            MailboxKind::Archive => "mail-archive-symbolic",
-            MailboxKind::Junk => "dialog-warning-symbolic",
-            MailboxKind::Trash => "user-trash-symbolic",
-            MailboxKind::Flagged => "starred-symbolic",
-            MailboxKind::Other => "folder-symbolic",
+            MailboxKind::Inbox => "mailview-inbox-symbolic",
+            MailboxKind::Drafts => "mailview-drafts-symbolic",
+            MailboxKind::Sent => "mailview-sent-symbolic",
+            MailboxKind::Archive => "mailview-archive-symbolic",
+            MailboxKind::Junk => "mailview-junk-symbolic",
+            MailboxKind::Trash => "mailview-trash-symbolic",
+            MailboxKind::Flagged => "mailview-flagged-symbolic",
+            MailboxKind::Other => "mailview-folder-symbolic",
         }
     }
 

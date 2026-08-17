@@ -24,18 +24,84 @@ use message_view::MessageView;
 
 const APP_ID: &str = "it.antoniopicone.MailView";
 
+/// A mailbox that spans every configured account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartMailbox {
+    /// Every account's inbox, merged and sorted by date.
+    AllInboxes,
+    /// Flagged messages across those inboxes.
+    Flagged,
+    /// Unread messages across those inboxes.
+    Unread,
+}
+
+impl SmartMailbox {
+    fn title(&self) -> &'static str {
+        match self {
+            SmartMailbox::AllInboxes => "In entrata (tutte)",
+            SmartMailbox::Flagged => "Contrassegnati",
+            SmartMailbox::Unread => "Non letti",
+        }
+    }
+
+    fn icon(&self) -> &'static str {
+        match self {
+            SmartMailbox::AllInboxes => "mailview-inbox-all-symbolic",
+            SmartMailbox::Flagged => "mailview-flagged-symbolic",
+            SmartMailbox::Unread => "mailview-unread-symbolic",
+        }
+    }
+
+    /// Whether a message belongs in this mailbox.
+    fn accepts(&self, message: &MessageSummary) -> bool {
+        match self {
+            SmartMailbox::AllInboxes => true,
+            SmartMailbox::Flagged => message.flagged,
+            SmartMailbox::Unread => !message.seen,
+        }
+    }
+}
+
+/// What the sidebar selection currently points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderTarget {
+    Smart(SmartMailbox),
+    Mailbox { account_id: String, path: String },
+}
+
+impl FolderTarget {
+    fn spans_accounts(&self) -> bool {
+        matches!(self, FolderTarget::Smart(_))
+    }
+}
+
+/// One selectable sidebar row. The same mailbox can appear twice — once as a
+/// shortcut in the unified section and once inside its account's own section —
+/// so `shortcut` distinguishes the two for selection tracking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SidebarEntry {
+    target: FolderTarget,
+    shortcut: bool,
+}
+
 /// Everything the UI needs to know that is not held by a widget.
 #[derive(Default)]
 struct State {
     accounts: Vec<Account>,
     mailboxes: HashMap<String, Vec<Mailbox>>,
     status: HashMap<String, (ConnectionState, String)>,
-    /// Parallel to the sidebar's rows: which mailbox each row selects.
-    sidebar_index: Vec<Option<(String, String)>>,
-    current_folder: Option<(String, String)>,
-    /// Every message loaded for the current folder, newest first.
+    /// Parallel to the sidebar's rows: what each row selects.
+    sidebar_index: Vec<Option<SidebarEntry>>,
+    current_target: Option<FolderTarget>,
+    /// The row that is selected, so a rebuild can restore it even though row
+    /// indices shift as other accounts finish loading.
+    selected_entry: Option<SidebarEntry>,
+    /// Messages per account. A single mailbox fills one bucket; a unified view
+    /// fills one per account and merges them for display.
+    buckets: HashMap<String, Vec<MessageSummary>>,
+    /// The merged, date-sorted view of `buckets`.
     messages: Vec<MessageSummary>,
-    /// Indices into `messages` that survive the current search.
+    /// Indices into `messages` that survive the current search and target.
     visible: Vec<usize>,
     current_message: Option<Message>,
     search: String,
@@ -43,8 +109,12 @@ struct State {
     /// Set once the user picks a mailbox themselves, so later arrivals from
     /// slower accounts stop moving them around.
     user_picked_folder: bool,
-    /// True while we are driving a selection ourselves.
+    /// True while we are driving a sidebar selection ourselves.
     selecting_programmatically: bool,
+    /// True while we are re-selecting the open message after a list rebuild.
+    restoring_message: bool,
+    /// The screenshot hook must only fire once, not on every batch.
+    preselection_done: bool,
 }
 
 impl State {
@@ -54,6 +124,50 @@ impl State {
 
     fn mailbox(&self, account_id: &str, path: &str) -> Option<&Mailbox> {
         self.mailboxes.get(account_id)?.iter().find(|m| m.path == path)
+    }
+
+    /// The IMAP path of an account's inbox, once its folder list has arrived.
+    fn inbox_path(&self, account_id: &str) -> Option<&str> {
+        self.mailboxes
+            .get(account_id)?
+            .iter()
+            .find(|m| m.kind == MailboxKind::Inbox)
+            .map(|m| m.path.as_str())
+    }
+
+    fn inbox_unread(&self, account_id: &str) -> u32 {
+        self.mailboxes
+            .get(account_id)
+            .and_then(|list| list.iter().find(|m| m.kind == MailboxKind::Inbox))
+            .map(|m| m.unread)
+            .unwrap_or(0)
+    }
+
+    fn total_inbox_unread(&self) -> u32 {
+        self.accounts.iter().map(|a| self.inbox_unread(&a.id)).sum()
+    }
+
+    fn account_label(&self, account_id: &str) -> Option<String> {
+        self.accounts.iter().find(|a| a.id == account_id).map(|a| a.short_label())
+    }
+
+    /// Does an incoming batch of messages belong to what is on screen?
+    fn batch_is_relevant(&self, account_id: &str, mailbox: &str) -> bool {
+        match &self.current_target {
+            Some(FolderTarget::Mailbox { account_id: a, path }) => {
+                a == account_id && path == mailbox
+            }
+            Some(FolderTarget::Smart(_)) => self.inbox_path(account_id) == Some(mailbox),
+            None => false,
+        }
+    }
+
+    /// Rebuild the merged message list from the per-account buckets.
+    fn remerge(&mut self) {
+        let mut merged: Vec<MessageSummary> =
+            self.buckets.values().flat_map(|list| list.iter().cloned()).collect();
+        merged.sort_by(|a, b| b.date.cmp(&a.date));
+        self.messages = merged;
     }
 }
 
@@ -160,7 +274,7 @@ impl App {
             self.widgets.sidebar_list.connect_row_selected(move |_, row| {
                 let Some(row) = row else { return };
                 let index = row.index() as usize;
-                let (target, programmatic) = {
+                let (entry, programmatic) = {
                     let state = app.state.borrow();
                     (
                         state.sidebar_index.get(index).cloned().flatten(),
@@ -170,8 +284,9 @@ impl App {
                 if !programmatic {
                     app.state.borrow_mut().user_picked_folder = true;
                 }
-                if let Some((account_id, path)) = target {
-                    app.open_folder(&account_id, &path);
+                if let Some(entry) = entry {
+                    app.state.borrow_mut().selected_entry = Some(entry.clone());
+                    app.open_target(entry.target);
                 }
             });
         }
@@ -180,6 +295,11 @@ impl App {
         {
             let app = self.clone();
             self.widgets.message_list.connect_row_selected(move |_, row| {
+                // Clearing the list during a rebuild fires this with `None`;
+                // ignore both halves of a restore so the reading pane holds.
+                if app.state.borrow().restoring_message {
+                    return;
+                }
                 let Some(row) = row else {
                     app.widgets.message_view.show_empty();
                     app.set_actions_enabled(false);
@@ -328,27 +448,47 @@ impl App {
                 }
                 self.rebuild_sidebar();
                 self.select_first_inbox_if_idle();
+
+                // A unified view is opened as soon as the first account
+                // answers, so accounts that report their folders later still
+                // need their inbox pulled in.
+                let pending = {
+                    let state = self.state.borrow();
+                    let spans = state
+                        .current_target
+                        .as_ref()
+                        .map(FolderTarget::spans_accounts)
+                        .unwrap_or(false);
+                    if spans && !state.buckets.contains_key(&account_id) {
+                        state.inbox_path(&account_id).map(str::to_string)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(path) = pending {
+                    let page_size = self.config.borrow().page_size;
+                    self.backend.borrow().send(
+                        &account_id,
+                        Command::LoadMessages { mailbox: path, limit: page_size, offset: 0 },
+                    );
+                }
             }
 
             Event::Messages { account_id, mailbox, messages, append } => {
-                let is_current = self
-                    .state
-                    .borrow()
-                    .current_folder
-                    .as_ref()
-                    .map(|(a, m)| a == &account_id && m == &mailbox)
-                    .unwrap_or(false);
-                if !is_current {
-                    return;
-                }
                 {
                     let mut state = self.state.borrow_mut();
+                    if !state.batch_is_relevant(&account_id, &mailbox) {
+                        return;
+                    }
+                    let bucket = state.buckets.entry(account_id).or_default();
                     if append {
-                        state.messages.extend(messages);
+                        bucket.extend(messages);
                     } else {
-                        state.messages = messages;
+                        *bucket = messages;
                         state.current_message = None;
                     }
+                    state.remerge();
                 }
                 self.widgets.spinner.set_visible(false);
                 self.refresh_message_list();
@@ -356,14 +496,16 @@ impl App {
             }
 
             Event::MessageLoaded { account_id, message } => {
-                // A slow fetch can land after the user has moved on.
-                let still_relevant = self
-                    .state
-                    .borrow()
-                    .current_folder
-                    .as_ref()
-                    .map(|(current, _)| current == &account_id)
-                    .unwrap_or(false);
+                // A slow fetch can land after the user has moved on. In a
+                // unified view every account is in scope, so only a
+                // single-mailbox target can rule the message out.
+                let still_relevant = match &self.state.borrow().current_target {
+                    Some(FolderTarget::Mailbox { account_id: current, .. }) => {
+                        current == &account_id
+                    }
+                    Some(FolderTarget::Smart(_)) => true,
+                    None => false,
+                };
                 if !still_relevant {
                     return;
                 }
@@ -377,14 +519,14 @@ impl App {
                 let mut sidebar_needs_refresh = false;
                 {
                     let mut state = self.state.borrow_mut();
-                    let previously_seen = state
-                        .messages
+                    let bucket = state.buckets.entry(account_id.clone()).or_default();
+                    let previously_seen = bucket
                         .iter()
                         .find(|m| m.uid == uid && m.mailbox == mailbox)
                         .map(|m| m.seen);
 
                     if let Some(summary) =
-                        state.messages.iter_mut().find(|m| m.uid == uid && m.mailbox == mailbox)
+                        bucket.iter_mut().find(|m| m.uid == uid && m.mailbox == mailbox)
                     {
                         match flag.as_str() {
                             "\\Seen" => summary.seen = on,
@@ -392,6 +534,7 @@ impl App {
                             _ => {}
                         }
                     }
+                    state.remerge();
 
                     // Keep the sidebar's unread badge in step with the list.
                     if flag == "\\Seen" && previously_seen == Some(!on) {
@@ -409,7 +552,7 @@ impl App {
                         }
                     }
                 }
-                self.refresh_message_list_preserving_selection();
+                self.refresh_message_list();
                 if sidebar_needs_refresh {
                     self.rebuild_sidebar();
                 }
@@ -418,14 +561,15 @@ impl App {
             Event::MessageRemoved { account_id, mailbox, uid } => {
                 {
                     let mut state = self.state.borrow_mut();
-                    let was_unread = state
-                        .messages
+                    let bucket = state.buckets.entry(account_id.clone()).or_default();
+                    let was_unread = bucket
                         .iter()
                         .find(|m| m.uid == uid && m.mailbox == mailbox)
                         .map(|m| !m.seen)
                         .unwrap_or(false);
 
-                    state.messages.retain(|m| !(m.uid == uid && m.mailbox == mailbox));
+                    bucket.retain(|m| !(m.uid == uid && m.mailbox == mailbox));
+                    state.remerge();
                     state.current_message = None;
 
                     if was_unread {
@@ -469,19 +613,77 @@ impl App {
 
     // ------------------------------------------------------------- sidebar
 
+    /// Rebuild the sidebar: a unified section on top, then one section per
+    /// account, the way Mail on iOS arranges it.
     fn rebuild_sidebar(self: &Rc<Self>) {
         let widgets = &self.widgets;
         // Remember the selection by identity: row indices shift as other
         // accounts finish loading their folder lists.
-        let previous = self.state.borrow().current_folder.clone();
+        let previous = self.state.borrow().selected_entry.clone();
 
         while let Some(child) = widgets.sidebar_list.first_child() {
             widgets.sidebar_list.remove(&child);
         }
 
-        let mut index_map: Vec<Option<(String, String)>> = Vec::new();
+        let mut index_map: Vec<Option<SidebarEntry>> = Vec::new();
         let state = self.state.borrow();
 
+        let mut push = |row: gtk::ListBoxRow, entry: Option<SidebarEntry>| {
+            widgets.sidebar_list.append(&row);
+            index_map.push(entry);
+        };
+
+        // ---- unified section ------------------------------------------
+        // Only worth showing once there is more than one account to unify.
+        let unified = state.accounts.len() > 1;
+        if unified {
+            // No section header here: the pane is already titled "Caselle",
+            // and iOS leaves this first group unlabelled too.
+            let total_unread = state.total_inbox_unread();
+            push(
+                rows::smart_row(
+                    SmartMailbox::AllInboxes.title(),
+                    SmartMailbox::AllInboxes.icon(),
+                    total_unread,
+                ),
+                Some(SidebarEntry {
+                    target: FolderTarget::Smart(SmartMailbox::AllInboxes),
+                    shortcut: true,
+                }),
+            );
+
+            // One shortcut per account inbox.
+            for account in &state.accounts {
+                let Some(path) = state.inbox_path(&account.id) else { continue };
+                push(
+                    rows::smart_row(
+                        &account.short_label(),
+                        MailboxKind::Inbox.icon(),
+                        state.inbox_unread(&account.id),
+                    ),
+                    Some(SidebarEntry {
+                        target: FolderTarget::Mailbox {
+                            account_id: account.id.clone(),
+                            path: path.to_string(),
+                        },
+                        shortcut: true,
+                    }),
+                );
+            }
+
+            for smart in [SmartMailbox::Flagged, SmartMailbox::Unread] {
+                let badge = match smart {
+                    SmartMailbox::Unread => total_unread,
+                    _ => 0,
+                };
+                push(
+                    rows::smart_row(smart.title(), smart.icon(), badge),
+                    Some(SidebarEntry { target: FolderTarget::Smart(smart), shortcut: true }),
+                );
+            }
+        }
+
+        // ---- one section per account ----------------------------------
         for account in &state.accounts {
             let status = state
                 .status
@@ -489,15 +691,20 @@ impl App {
                 .map(|(_, detail)| detail.clone())
                 .unwrap_or_else(|| "In attesa…".to_string());
 
-            let header = rows::section_header(&account.short_label(), &status);
-            widgets.sidebar_list.append(&header);
-            index_map.push(None);
+            push(rows::section_header(&account.short_label(), &status), None);
 
             if let Some(mailboxes) = state.mailboxes.get(&account.id) {
                 for mailbox in mailboxes {
-                    let row = rows::mailbox_row(mailbox);
-                    widgets.sidebar_list.append(&row);
-                    index_map.push(Some((mailbox.account_id.clone(), mailbox.path.clone())));
+                    push(
+                        rows::mailbox_row(mailbox),
+                        Some(SidebarEntry {
+                            target: FolderTarget::Mailbox {
+                                account_id: mailbox.account_id.clone(),
+                                path: mailbox.path.clone(),
+                            },
+                            shortcut: false,
+                        }),
+                    );
                 }
             }
         }
@@ -505,8 +712,17 @@ impl App {
 
         // The map has to be in place before selecting: the selection handler
         // resolves the row index through it.
-        let restore = previous.and_then(|target| {
-            index_map.iter().position(|entry| entry.as_ref() == Some(&target))
+        let restore = previous.and_then(|entry| {
+            index_map
+                .iter()
+                .position(|candidate| candidate.as_ref() == Some(&entry))
+                // The row may have moved between sections; fall back to any
+                // row pointing at the same folder.
+                .or_else(|| {
+                    index_map.iter().position(|candidate| {
+                        candidate.as_ref().map(|c| &c.target) == Some(&entry.target)
+                    })
+                })
         });
         self.state.borrow_mut().sidebar_index = index_map;
 
@@ -531,15 +747,24 @@ impl App {
 
         let target = {
             let state = self.state.borrow();
-            state.accounts.iter().find_map(|account| {
-                let inbox = state
-                    .mailboxes
-                    .get(&account.id)?
-                    .iter()
-                    .find(|m| m.kind == MailboxKind::Inbox)?;
-                state.sidebar_index.iter().position(|entry| {
-                    entry.as_ref() == Some(&(account.id.clone(), inbox.path.clone()))
+            // With several accounts the unified inbox is the natural landing
+            // place; with one, its own inbox is.
+            let wanted = if state.accounts.len() > 1 {
+                Some(FolderTarget::Smart(SmartMailbox::AllInboxes))
+            } else {
+                state.accounts.iter().find_map(|account| {
+                    let path = state.inbox_path(&account.id)?;
+                    Some(FolderTarget::Mailbox {
+                        account_id: account.id.clone(),
+                        path: path.to_string(),
+                    })
                 })
+            };
+            wanted.and_then(|wanted| {
+                state
+                    .sidebar_index
+                    .iter()
+                    .position(|entry| entry.as_ref().map(|e| &e.target) == Some(&wanted))
             })
         };
 
@@ -554,52 +779,83 @@ impl App {
         self.state.borrow_mut().selecting_programmatically = false;
     }
 
-    fn open_folder(self: &Rc<Self>, account_id: &str, path: &str) {
+    fn open_target(self: &Rc<Self>, target: FolderTarget) {
         {
             let mut state = self.state.borrow_mut();
-            if state.current_folder.as_ref().map(|(a, m)| (a.as_str(), m.as_str()))
-                == Some((account_id, path))
-            {
+            if state.current_target.as_ref() == Some(&target) {
                 return;
             }
-            state.current_folder = Some((account_id.to_string(), path.to_string()));
+            state.current_target = Some(target.clone());
+            state.buckets.clear();
             state.messages.clear();
             state.visible.clear();
             state.current_message = None;
         }
 
-        let title = self
-            .state
-            .borrow()
-            .mailbox(account_id, path)
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| path.to_string());
+        let title = match &target {
+            FolderTarget::Smart(smart) => smart.title().to_string(),
+            FolderTarget::Mailbox { account_id, path } => self
+                .state
+                .borrow()
+                .mailbox(account_id, path)
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| path.clone()),
+        };
+
         self.widgets.folder_title.set_title(&title);
         self.widgets.folder_title.set_subtitle("Caricamento…");
         self.widgets.message_view.show_empty();
         self.widgets.spinner.set_visible(true);
         self.set_actions_enabled(false);
         self.refresh_message_list();
+        self.request_messages(&target);
+    }
 
+    /// Ask the backend for whatever `target` needs. A unified target queries
+    /// every account's inbox; the results are merged as they arrive.
+    fn request_messages(self: &Rc<Self>, target: &FolderTarget) {
         let page_size = self.config.borrow().page_size;
-        self.backend.borrow().send(
-            account_id,
-            Command::LoadMessages { mailbox: path.to_string(), limit: page_size, offset: 0 },
-        );
+        let backend = self.backend.borrow();
+
+        match target {
+            FolderTarget::Mailbox { account_id, path } => backend.send(
+                account_id,
+                Command::LoadMessages { mailbox: path.clone(), limit: page_size, offset: 0 },
+            ),
+            FolderTarget::Smart(_) => {
+                let state = self.state.borrow();
+                for account in &state.accounts {
+                    let Some(path) = state.inbox_path(&account.id) else { continue };
+                    backend.send(
+                        &account.id,
+                        Command::LoadMessages {
+                            mailbox: path.to_string(),
+                            limit: page_size,
+                            offset: 0,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     fn refresh_current_folder(self: &Rc<Self>) {
-        let Some((account_id, path)) = self.state.borrow().current_folder.clone() else {
+        let Some(target) = self.state.borrow().current_target.clone() else {
             return;
         };
         self.widgets.spinner.set_visible(true);
-        let page_size = self.config.borrow().page_size;
-        let backend = self.backend.borrow();
-        backend.send(&account_id, Command::LoadMailboxes);
-        backend.send(
-            &account_id,
-            Command::LoadMessages { mailbox: path, limit: page_size, offset: 0 },
-        );
+
+        {
+            let backend = self.backend.borrow();
+            match &target {
+                FolderTarget::Mailbox { account_id, .. } => {
+                    backend.send(account_id, Command::LoadMailboxes)
+                }
+                FolderTarget::Smart(_) => backend.broadcast(Command::LoadMailboxes),
+            }
+        }
+
+        self.request_messages(&target);
     }
 
     // -------------------------------------------------------- message list
@@ -607,25 +863,67 @@ impl App {
     fn refresh_message_list(self: &Rc<Self>) {
         let widgets = &self.widgets;
 
+        // Remember what was open by identity, taken from the message actually
+        // on screen rather than from the selected row. By the time we get here
+        // the merged list may already have been rebuilt underneath the old row
+        // indices, so those indices no longer mean anything.
+        let previously_open = self.state.borrow().current_message.as_ref().map(|message| {
+            (
+                message.summary.account_id.clone(),
+                message.summary.mailbox.clone(),
+                message.summary.uid,
+            )
+        });
+
+        // Emptying the list fires `row-selected(None)`, which would blank the
+        // reading pane. Suppress the handler for the whole rebuild.
+        self.state.borrow_mut().restoring_message = true;
+
         while let Some(child) = widgets.message_list.first_child() {
             widgets.message_list.remove(&child);
         }
 
         let mut state = self.state.borrow_mut();
         let needle = state.search.trim().to_lowercase();
+
+        // A smart mailbox narrows the merged list further.
+        let smart = match &state.current_target {
+            Some(FolderTarget::Smart(kind)) => Some(*kind),
+            _ => None,
+        };
+        // In a unified view each row says which account it came from.
+        let show_account =
+            state.current_target.as_ref().map(FolderTarget::spans_accounts).unwrap_or(false);
+
         let visible: Vec<usize> = state
             .messages
             .iter()
             .enumerate()
+            .filter(|(_, message)| smart.map(|k| k.accepts(message)).unwrap_or(true))
             .filter(|(_, message)| matches_search(message, &needle))
             .map(|(index, _)| index)
             .collect();
         state.visible = visible.clone();
 
-        let total = state.messages.len();
-        let unread = state.messages.iter().filter(|m| !m.seen).count();
-        let rows_to_add: Vec<gtk::ListBoxRow> =
-            visible.iter().filter_map(|i| state.messages.get(*i)).map(rows::message_row).collect();
+        let total = visible.len();
+        let unread = visible
+            .iter()
+            .filter_map(|i| state.messages.get(*i))
+            .filter(|m| !m.seen)
+            .count();
+
+        let rows_to_add: Vec<gtk::ListBoxRow> = visible
+            .iter()
+            .filter_map(|i| state.messages.get(*i))
+            .map(|message| {
+                let account = if show_account {
+                    state.account_label(&message.account_id)
+                } else {
+                    None
+                };
+                rows::message_row(message, account.as_deref())
+            })
+            .collect();
         drop(state);
 
         for row in rows_to_add {
@@ -651,17 +949,37 @@ impl App {
             format!("{found} {}", plural(found, "risultato", "risultati"))
         };
         widgets.folder_title.set_subtitle(&subtitle);
-    }
 
-    /// Rebuild the list but keep the user's place, used after a flag change.
-    fn refresh_message_list_preserving_selection(self: &Rc<Self>) {
-        let selected = self.widgets.message_list.selected_row().map(|r| r.index());
-        self.refresh_message_list();
-        if let Some(index) = selected {
-            if let Some(row) = self.widgets.message_list.row_at_index(index) {
-                self.widgets.message_list.select_row(Some(&row));
+        // Put the user back on the message they had open. Re-selecting must not
+        // re-open it: it is already rendered, and a second fetch would flicker
+        // the reading pane.
+        if let Some((account_id, mailbox, uid)) = previously_open {
+            let row_index = {
+                let state = self.state.borrow();
+                state.visible.iter().position(|i| {
+                    state
+                        .messages
+                        .get(*i)
+                        .map(|m| {
+                            m.uid == uid && m.mailbox == mailbox && m.account_id == account_id
+                        })
+                        .unwrap_or(false)
+                })
+            };
+
+            match row_index.and_then(|i| widgets.message_list.row_at_index(i as i32)) {
+                Some(row) => widgets.message_list.select_row(Some(&row)),
+                // It was filtered out or moved away; the pane has nothing left
+                // to show.
+                None => {
+                    widgets.message_view.show_empty();
+                    self.state.borrow_mut().current_message = None;
+                    self.set_actions_enabled(false);
+                }
             }
         }
+
+        self.state.borrow_mut().restoring_message = false;
     }
 
     fn open_message(self: &Rc<Self>, row_index: usize) {
@@ -710,10 +1028,13 @@ impl App {
     fn apply_preselection(self: &Rc<Self>) {
         let Ok(value) = std::env::var("MAILVIEW_SELECT_MESSAGE") else { return };
         let Ok(index) = value.trim().parse::<i32>() else { return };
-        if self.widgets.message_list.selected_row().is_some() {
+        // Only once: batches from slower accounts must not re-open a message
+        // and mark it read behind the user's back.
+        if self.state.borrow().preselection_done {
             return;
         }
         if let Some(row) = self.widgets.message_list.row_at_index(index) {
+            self.state.borrow_mut().preselection_done = true;
             self.widgets.message_list.select_row(Some(&row));
         }
     }
@@ -782,8 +1103,20 @@ impl App {
     /// The account whose mailbox is currently open, falling back to the first
     /// configured one so "new message" works before anything is selected.
     fn active_account(&self) -> Option<Account> {
+        // In a unified view the folder does not identify an account, so the
+        // open message decides who a reply comes from.
+        if let Some((account_id, _, _)) = self.selected_message() {
+            let state = self.state.borrow();
+            if let Some(account) = state.accounts.iter().find(|a| a.id == account_id) {
+                return Some(account.clone());
+            }
+        }
+
         let state = self.state.borrow();
-        let id = state.current_folder.as_ref().map(|(account_id, _)| account_id.clone());
+        let id = match &state.current_target {
+            Some(FolderTarget::Mailbox { account_id, .. }) => Some(account_id.clone()),
+            _ => None,
+        };
         match id {
             Some(id) => state.accounts.iter().find(|a| a.id == id).cloned(),
             None => state.accounts.first().cloned(),
@@ -1160,6 +1493,29 @@ fn build_widgets(application: &adw::Application) -> Widgets {
         flag_button,
         action_buttons,
         spinner,
+    }
+}
+
+/// Register the compiled-in icon set with the display's icon theme.
+///
+/// Bundling the icons means the application never depends on a matching
+/// version being installed system-wide.
+pub fn load_icons() {
+    // `Bytes::from` copies into GLib-owned memory, which keeps the GVDB header
+    // aligned; `from_static` over `include_bytes!` is not guaranteed to be.
+    let data = glib::Bytes::from(
+        &include_bytes!(concat!(env!("OUT_DIR"), "/mailview.gresource"))[..],
+    );
+
+    match gio::Resource::from_data(&data) {
+        Ok(resource) => {
+            gio::resources_register(&resource);
+            if let Some(display) = gtk::gdk::Display::default() {
+                gtk::IconTheme::for_display(&display)
+                    .add_resource_path("/it/antoniopicone/MailView/icons");
+            }
+        }
+        Err(e) => log::error!("could not register the bundled icons: {e}"),
     }
 }
 

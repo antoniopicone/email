@@ -11,6 +11,13 @@ integrazione con gli account online già configurati in GNOME.
 - **Layout a tre pannelli** come Apple Mail: caselle a sinistra, elenco dei
   messaggi al centro, messaggio a destra. I pannelli si riducono in modo
   responsive sugli schermi stretti grazie a `AdwNavigationSplitView`.
+- **Vista unificata** sul modello di Mail per iOS: *In entrata (tutte)* fonde
+  la posta in arrivo di ogni account ordinandola per data, con scorciatoie per
+  le singole caselle e le caselle intelligenti *Contrassegnati* e *Non letti*.
+  Ogni riga indica da quale account proviene. Con un solo account la sezione
+  non compare.
+- **Set di icone proprio**, disegnato sul linguaggio visivo di Mail per iOS e
+  compilato dentro il binario, quindi indipendente dal tema di sistema.
 - **IMAP su TLS**, con STARTTLS opzionale per i server sulla porta 143.
 - **Gmail tramite XOAUTH2**: nessuna password da inserire e nessun flusso
   OAuth da gestire, il token arriva da GNOME Online Accounts.
@@ -30,6 +37,28 @@ integrazione con gli account online già configurati in GNOME.
 | Modalità scura | Composizione |
 | --- | --- |
 | ![Modalità scura](docs/screenshots/02-dark.png) | ![Risposta](docs/screenshots/03-compose.png) |
+
+| Casella intelligente | Ricerca |
+| --- | --- |
+| ![Contrassegnati](docs/screenshots/05-flagged.png) | ![Ricerca](docs/screenshots/04-search.png) |
+
+### Icone
+
+![Set di icone](docs/screenshots/06-icons.png)
+
+Le icone sono generate da `tools/make-icons.py` e compilate in un GResource.
+Sono disegnate come **path pieni**, mai come tratti: GTK ricolora le icone
+simboliche iniettando `fill` sugli elementi `path`, e non tocca `stroke`, per
+cui un contorno tracciato manterrebbe il colore dichiarato nel file e
+sparirebbe su sfondo scuro. Il generatore costruisce quindi i contorni
+spostando ogni polilinea sui due lati e riempiendo la fascia risultante, con
+giunzioni a spigolo vivo.
+
+Per rigenerarle:
+
+```bash
+python3 tools/make-icons.py
+```
 
 ## Requisiti
 
@@ -69,7 +98,8 @@ Opzioni disponibili:
 
 | Opzione | Effetto |
 | --- | --- |
-| `--demo` | usa la casella dimostrativa integrata |
+| `--demo` | usa la casella dimostrativa integrata (due account) |
+| `--demo-single` | come `--demo`, ma con un solo account |
 | `--no-gnome` | ignora gli account di GNOME Online Accounts |
 | `--help` | mostra l'elenco delle opzioni |
 
@@ -138,6 +168,13 @@ src/
     compose.rs         finestra di composizione
     accounts.rs        dialogo di aggiunta account
     style.css          foglio di stile
+data/
+  icons/               icone simboliche generate
+  mailview.gresource.xml
+tools/
+  make-icons.py        generatore delle icone
+  screenshot.sh        cattura su display virtuale
+build.rs               compila le icone nel GResource
 ```
 
 La rete non gira mai sul main loop di GTK. Ogni account ha un thread worker che
@@ -163,7 +200,8 @@ cargo test
 
 I test coprono la logica pura: classificazione delle cartelle IMAP
 (SPECIAL-USE e nomi localizzati), formattazione delle date in stile Apple Mail,
-sanitizzazione HTML, analisi dei destinatari e prefissi `Re:`/`Fwd:`.
+sanitizzazione HTML, analisi dei destinatari, prefissi `Re:`/`Fwd:` e
+deduzione dei server dal dominio dell'indirizzo.
 
 ## Screenshot
 
@@ -175,7 +213,8 @@ tools/screenshot.sh docs/screenshots/01-light.png --scheme light -- --demo
 
 Lo script avvia Xvfb con un window manager, lancia l'applicazione e cattura la
 finestra. Accetta `--scheme light|dark`, `--size WxH`, `--key` per inviare una
-scorciatoia e `--root` per catturare l'intero schermo.
+scorciatoia, `--click X,Y` per fare clic, `--type` per digitare e `--root` per
+catturare l'intero schermo.
 
 ## Stato
 
@@ -183,6 +222,10 @@ Funzionante per l'uso quotidiano di lettura e risposta. Non ancora
 implementati: thread di conversazione, IDLE per le notifiche push, cache
 offline dei messaggi, allegati in uscita e rimozione degli account
 dall'interfaccia.
+
+Le caselle intelligenti *Contrassegnati* e *Non letti* lavorano sulla posta in
+arrivo caricata, non su una ricerca lato server: coprono quindi i messaggi
+visibili nella vista unificata, non l'intero archivio.
 
 ## Licenza
 

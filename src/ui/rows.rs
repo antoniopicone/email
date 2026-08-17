@@ -70,7 +70,37 @@ pub fn mailbox_row(mailbox: &Mailbox) -> gtk::ListBoxRow {
 /// One message in the middle pane, laid out the way Apple Mail does it:
 /// sender and date on the first line, subject on the second, and a dimmed
 /// two-line preview underneath.
-pub fn message_row(message: &MessageSummary) -> gtk::ListBoxRow {
+/// A sidebar row for a unified mailbox or an account inbox shortcut.
+pub fn smart_row(title: &str, icon_name: &str, unread: u32) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.add_css_class("mailbox-row");
+
+    let boxx = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    boxx.set_margin_start(4);
+
+    boxx.append(&gtk::Image::from_icon_name(icon_name));
+
+    let label = gtk::Label::new(Some(title));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.add_css_class("mailbox-name");
+    boxx.append(&label);
+
+    if unread > 0 {
+        let badge = gtk::Label::new(Some(&unread.to_string()));
+        badge.add_css_class("mailbox-badge");
+        badge.set_valign(gtk::Align::Center);
+        boxx.append(&badge);
+    }
+
+    row.set_child(Some(&boxx));
+    row
+}
+
+/// `account` labels which account a message came from, shown only in the
+/// unified views where the list mixes several accounts together.
+pub fn message_row(message: &MessageSummary, account: Option<&str>) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
 
     let outer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -131,15 +161,33 @@ pub fn message_row(message: &MessageSummary) -> gtk::ListBoxRow {
 
     column.append(&top);
 
-    // Line 2 — subject.
+    // Line 2 — subject, with the source account alongside it when the list
+    // mixes accounts together.
     let subject = gtk::Label::new(Some(message.subject_or_placeholder()));
     subject.set_xalign(0.0);
+    subject.set_hexpand(true);
     subject.set_ellipsize(gtk::pango::EllipsizeMode::End);
     subject.add_css_class("msg-subject");
     if !message.seen {
         subject.add_css_class("unread");
     }
-    column.append(&subject);
+
+    match account {
+        Some(name) => {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            line.append(&subject);
+
+            let tag = gtk::Label::new(Some(name));
+            tag.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            tag.set_max_width_chars(16);
+            tag.add_css_class("msg-account");
+            tag.set_valign(gtk::Align::Center);
+            line.append(&tag);
+
+            column.append(&line);
+        }
+        None => column.append(&subject),
+    }
 
     // Lines 3-4 — the preview.
     if !message.snippet.trim().is_empty() {

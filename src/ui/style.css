@@ -106,6 +106,18 @@ row:selected .mailbox-badge {
   color: alpha(currentColor, 0.5);
 }
 
+/* Which account a message came from, shown only in the unified mailboxes.
+ * Every row carries one, so it stays quiet: a filled badge on each line would
+ * fight the sender name for attention. */
+.msg-account {
+  font-size: 0.78rem;
+  color: alpha(@accent_color, 0.85);
+}
+
+row:selected .msg-account {
+  color: alpha(#ffffff, 0.85);
+}
+
 row:selected .msg-snippet,
 row:selected .msg-date {
   color: alpha(#ffffff, 0.8);

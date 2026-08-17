@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Icons are compiled into the binary so the application does not depend on
+  anything being installed into the system icon theme. The prefix mirrors the
+  layout GtkIconTheme expects from a resource path: <prefix>/<size>/<context>.
+-->
+<gresources>
+  <gresource prefix="/it/antoniopicone/MailView/icons/scalable/actions">
+    <file preprocess="xml-stripblanks">mailview-inbox-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-inbox-all-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-drafts-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-sent-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-junk-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-trash-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-archive-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-folder-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-flagged-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">mailview-unread-symbolic.svg</file>
+  </gresource>
+</gresources>

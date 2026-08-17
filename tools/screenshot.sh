@@ -15,6 +15,7 @@ WAIT=6
 WIDTH=1680
 HEIGHT=1050
 KEYS=()
+CLICKS=()
 TYPE_TEXT=""
 CAPTURE_ROOT=0
 APP_ARGS=()
@@ -26,6 +27,8 @@ while [[ $# -gt 0 ]]; do
         --size)   WIDTH="${2%x*}"; HEIGHT="${2#*x}"; shift 2 ;;
         # Send a key combination (e.g. ctrl+Return) once the window is up.
         --key)    KEYS+=("$2"); shift 2 ;;
+        # Click at X,Y inside the window, e.g. --click 100,217
+        --click)  CLICKS+=("$2"); shift 2 ;;
         --type)   TYPE_TEXT="$2"; shift 2 ;;
         # Capture the whole screen, needed for secondary windows.
         --root)   CAPTURE_ROOT=1; shift ;;
@@ -117,6 +120,12 @@ sleep "$WAIT"
 xdotool windowactivate "$WIN" >/dev/null 2>&1
 xdotool windowraise "$WIN" >/dev/null 2>&1
 sleep 1
+
+for point in "${CLICKS[@]:-}"; do
+    [[ -z "$point" ]] && continue
+    xdotool mousemove --window "$WIN" "${point%,*}" "${point#*,}" click 1 >/dev/null 2>&1
+    sleep 2
+done
 
 for key in "${KEYS[@]:-}"; do
     [[ -z "$key" ]] && continue

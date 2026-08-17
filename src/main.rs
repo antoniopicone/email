@@ -21,22 +21,30 @@ use model::Account;
 struct Options {
     /// Show the built-in sample mailbox instead of talking to a server.
     demo: bool,
+    /// Restrict the demo to a single account, which is the layout most people
+    /// actually see: no unified section, just the account's own folders.
+    demo_single: bool,
     /// Skip GNOME Online Accounts discovery.
     no_gnome: bool,
 }
 
 fn parse_options() -> Options {
-    let mut options = Options { demo: false, no_gnome: false };
+    let mut options = Options { demo: false, demo_single: false, no_gnome: false };
     for argument in std::env::args().skip(1) {
         match argument.as_str() {
             "--demo" => options.demo = true,
+            "--demo-single" => {
+                options.demo = true;
+                options.demo_single = true;
+            }
             "--no-gnome" | "--no-goa" => options.no_gnome = true,
             "--help" | "-h" => {
                 println!(
                     "MailView — client di posta per GNOME\n\n\
                      Uso: mailview [OPZIONI]\n\n\
                      Opzioni:\n  \
-                     --demo       usa la casella dimostrativa, senza connessioni di rete\n  \
+                     --demo          usa la casella dimostrativa, senza connessioni di rete\n  \
+                     --demo-single   come --demo ma con un solo account\n  \
                      --no-gnome   non leggere gli account da GNOME Online Accounts\n  \
                      -h, --help   mostra questo messaggio\n"
                 );
@@ -53,7 +61,11 @@ fn parse_options() -> Options {
 fn gather_accounts(options: &Options, config: &Config) -> Vec<Account> {
     if options.demo {
         log::info!("starting in demo mode");
-        return demo::accounts();
+        let mut accounts = demo::accounts();
+        if options.demo_single {
+            accounts.truncate(1);
+        }
+        return accounts;
     }
 
     let mut accounts = Vec::new();
@@ -119,6 +131,7 @@ fn main() -> glib::ExitCode {
     let theme = initial_theme(&config);
 
     application.connect_startup(move |_| {
+        ui::load_icons();
         ui::load_css();
         ui::apply_theme(theme);
     });
