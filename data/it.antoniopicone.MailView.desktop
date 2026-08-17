@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=MailView
+GenericName=Email Client
+GenericName[it]=Client di posta
+Comment=Read and write email with IMAP and Gmail
+Comment[it]=Leggi e scrivi email con IMAP e Gmail
+Exec=mailview
+Icon=it.antoniopicone.MailView
+Terminal=false
+Categories=Network;Email;GTK;
+Keywords=email;mail;imap;gmail;posta;
+StartupNotify=true
+MimeType=x-scheme-handler/mailto;
