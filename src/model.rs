@@ -65,7 +65,7 @@ impl Account {
 
 /// The well-known role of a mailbox, derived from IMAP SPECIAL-USE flags or
 /// from the folder name when the server does not advertise them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MailboxKind {
     Inbox,
     Drafts,
@@ -141,7 +141,7 @@ impl MailboxKind {
 }
 
 /// A folder on the server.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mailbox {
     pub account_id: String,
     /// Full IMAP path, e.g. `[Gmail]/Sent Mail`.

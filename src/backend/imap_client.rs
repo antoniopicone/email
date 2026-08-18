@@ -1,6 +1,7 @@
 //! The synchronous IMAP session used by the per-account worker threads.
 
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Local, TimeZone};
@@ -13,6 +14,31 @@ use crate::model::{
 };
 
 type Session = imap::Session<TlsStream<TcpStream>>;
+
+/// Bounds how long the initial TCP handshake may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bounds every subsequent read/write on the socket. Without this, a
+/// connection that stops answering mid-command (a dropped packet a firewall
+/// or a broken IPv6 path swallows, say) blocks the worker thread forever:
+/// the UI would keep showing that account as "syncing" indefinitely, with no
+/// error and no way to recover short of restarting the app.
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Open a TCP connection with both a connect and an I/O deadline, so a
+/// server or network that stops responding fails loudly instead of hanging
+/// the worker thread.
+fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
+    let addr = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("resolving {host}:{port}"))?
+        .next()
+        .ok_or_else(|| anyhow!("no address found for {host}:{port}"))?;
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+        .with_context(|| format!("connecting to {host}:{port}"))?;
+    stream.set_read_timeout(Some(IO_TIMEOUT)).context("setting the socket read timeout")?;
+    stream.set_write_timeout(Some(IO_TIMEOUT)).context("setting the socket write timeout")?;
+    Ok(stream)
+}
 
 /// Fields we ask for when building the message list. Everything here is cheap
 /// except the leading kilobyte of body text, which gives us the list preview
@@ -42,12 +68,25 @@ impl ImapClient {
             credentials.mechanism()
         );
 
+        let tcp = connect_tcp(host, port)?;
+
         let client = if account.use_starttls {
-            imap::connect_starttls((host, port), host, &tls)
-                .with_context(|| format!("connecting to {host}:{port} with STARTTLS"))?
+            let mut plain = imap::Client::new(tcp);
+            plain
+                .read_greeting()
+                .with_context(|| format!("reading the greeting from {host}:{port}"))?;
+            plain
+                .secure(host, &tls)
+                .map_err(|e| anyhow!("STARTTLS negotiation with {host}:{port} failed: {e}"))?
         } else {
-            imap::connect((host, port), host, &tls)
-                .with_context(|| format!("connecting to {host}:{port} over TLS"))?
+            let tls_stream = tls
+                .connect(host, tcp)
+                .with_context(|| format!("TLS handshake with {host}:{port}"))?;
+            let mut socket = imap::Client::new(tls_stream);
+            socket
+                .read_greeting()
+                .with_context(|| format!("reading the greeting from {host}:{port}"))?;
+            socket
         };
 
         let session = match credentials {

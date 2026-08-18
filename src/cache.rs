@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Attachment, Mailaddr, Message, MessageSummary};
+use crate::model::{Attachment, Mailaddr, Mailbox, Message, MessageSummary};
 
 #[derive(Serialize, Deserialize)]
 struct CachedAddr {
@@ -184,8 +184,16 @@ fn sanitize(value: &str) -> String {
     }
 }
 
+fn account_dir(account_id: &str) -> PathBuf {
+    root().join(sanitize(account_id))
+}
+
 fn mailbox_dir(account_id: &str, mailbox: &str) -> PathBuf {
-    root().join(sanitize(account_id)).join(sanitize(mailbox))
+    account_dir(account_id).join(sanitize(mailbox))
+}
+
+fn folders_path(account_id: &str) -> PathBuf {
+    account_dir(account_id).join("folders.json")
 }
 
 fn summaries_path(account_id: &str, mailbox: &str) -> PathBuf {
@@ -224,6 +232,17 @@ fn spawn_write<T: Serialize + Send + 'static>(path: PathBuf, value: T) {
 }
 
 // ------------------------------------------------------------------ public
+
+/// The account's folder list, as of the last time it was fetched.
+pub fn load_mailboxes(account_id: &str) -> Option<Vec<Mailbox>> {
+    let bytes = fs::read(folders_path(account_id)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Remember an account's freshly listed folders for the next launch.
+pub fn store_mailboxes(account_id: &str, mailboxes: &[Mailbox]) {
+    spawn_write(folders_path(account_id), mailboxes.to_vec());
+}
 
 /// The most recently cached page of a mailbox's message list, if any.
 pub fn load_summaries(account_id: &str, mailbox: &str) -> Option<Vec<MessageSummary>> {

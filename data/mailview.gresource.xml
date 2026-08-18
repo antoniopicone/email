@@ -3,18 +3,23 @@
   Icons are compiled into the binary so the application does not depend on
   anything being installed into the system icon theme. The prefix mirrors the
   layout GtkIconTheme expects from a resource path: <prefix>/<size>/<context>.
+  Sourcedir is the shared "data/icons" root, so each entry's path also carries
+  its real location on disk; "alias" keeps the resource name itself short.
 -->
 <gresources>
   <gresource prefix="/it/antoniopicone/MailView/icons/scalable/actions">
-    <file preprocess="xml-stripblanks">mailview-inbox-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-inbox-all-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-drafts-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-sent-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-junk-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-trash-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-archive-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-folder-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-flagged-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">mailview-unread-symbolic.svg</file>
+    <file alias="mailview-inbox-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-inbox-symbolic.svg</file>
+    <file alias="mailview-inbox-all-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-inbox-all-symbolic.svg</file>
+    <file alias="mailview-drafts-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-drafts-symbolic.svg</file>
+    <file alias="mailview-sent-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-sent-symbolic.svg</file>
+    <file alias="mailview-junk-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-junk-symbolic.svg</file>
+    <file alias="mailview-trash-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-trash-symbolic.svg</file>
+    <file alias="mailview-archive-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-archive-symbolic.svg</file>
+    <file alias="mailview-folder-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-folder-symbolic.svg</file>
+    <file alias="mailview-flagged-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-flagged-symbolic.svg</file>
+    <file alias="mailview-unread-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-unread-symbolic.svg</file>
+  </gresource>
+  <gresource prefix="/it/antoniopicone/MailView/icons/scalable/apps">
+    <file alias="it.antoniopicone.MailView.svg" preprocess="xml-stripblanks">hicolor/scalable/apps/it.antoniopicone.MailView.svg</file>
   </gresource>
 </gresources>

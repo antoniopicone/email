@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Application icon, in the flat two-layer "brick" style used across the
+     Adwaita/GNOME app-icon set: a rounded-square background in the standard
+     Adwaita blue gradient (blue_2 -> blue_4), holding a white envelope built
+     from a shadow layer and a main layer for a slight papercut depth, with
+     an open flap in a darker translucent blue. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="14" y1="10" x2="114" y2="118" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6cc6ff"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="27" fill="url(#bg)"/>
+  <rect x="26" y="48" width="76" height="52" rx="8" fill="#0b2f5e" opacity="0.18"/>
+  <rect x="26" y="44" width="76" height="52" rx="8" fill="#ffffff"/>
+  <path d="M36 44L64 68L92 44Z" fill="#1a5fb4" opacity="0.22"/>
+</svg>

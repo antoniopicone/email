@@ -19,7 +19,7 @@ use adw::prelude::*;
 use crate::backend::{Backend, Command, ConnectionState, Event};
 use compose::ComposeKind;
 use crate::config::{Config, ThemePreference};
-use crate::model::{Account, Mailbox, MailboxKind, Message, MessageSummary};
+use crate::model::{Account, Mailaddr, Mailbox, MailboxKind, Message, MessageSummary};
 use message_view::MessageView;
 
 const APP_ID: &str = "it.antoniopicone.MailView";
@@ -121,8 +121,14 @@ struct State {
     visible: Vec<usize>,
     /// Lazy-paging progress per account, for the currently open target.
     pagination: HashMap<String, PageState>,
+    /// account_id -> human description of the sync currently in flight for
+    /// it, shown in the bottom status bar. Removed once that operation's
+    /// event (or error) arrives.
+    activity: HashMap<String, String>,
     current_message: Option<Message>,
     search: String,
+    /// Filter toggle: when set, the list shows only unread messages.
+    unread_only: bool,
     dark: bool,
     /// Set once the user picks a mailbox themselves, so later arrivals from
     /// slower accounts stop moving them around.
@@ -202,12 +208,16 @@ struct Widgets {
     banner: adw::Banner,
     toast_overlay: adw::ToastOverlay,
     flag_button: gtk::ToggleButton,
+    unread_filter_button: gtk::ToggleButton,
     action_buttons: Vec<gtk::Widget>,
-    spinner: gtk::Spinner,
+    /// Bottom status bar: sync spinner and a description of what is
+    /// currently being synced.
+    status_spinner: gtk::Spinner,
+    status_label: gtk::Label,
     /// Mailboxes ↔ (messages | reader). Their widths are user-resizable and
     /// persisted to config on close.
-    outer_split: adw::NavigationSplitView,
-    inner_split: adw::NavigationSplitView,
+    outer_paned: gtk::Paned,
+    inner_paned: gtk::Paned,
 }
 
 /// The main window and its wiring.
@@ -248,11 +258,26 @@ impl App {
 
         app.connect_signals();
         app.install_actions(application);
+
+        // Restore each account's folder list from the last session before
+        // anything has connected. With it in hand, the sidebar can populate
+        // and land on a target immediately — including sending the real
+        // LoadMessages request below — instead of waiting for the network.
+        app.preload_mailboxes_from_cache();
         app.rebuild_sidebar();
+        app.select_first_inbox_if_idle();
+
+        // Fallback for accounts with no cached folder list yet (first ever
+        // launch): still show their last known inbox, guessing "INBOX" since
+        // the real path isn't known before the folder list arrives.
+        app.preload_inboxes_from_cache();
 
         // Ask every account for its folder list; the first inbox that arrives
         // is selected automatically.
         backend.borrow().broadcast(Command::LoadMailboxes);
+        for account in &accounts {
+            app.set_activity(&account.id, "Aggiornamento delle cartelle…".to_string());
+        }
 
         // Drain backend events on the main loop.
         {
@@ -341,6 +366,15 @@ impl App {
             });
         }
 
+        // Unread-only filter.
+        {
+            let app = self.clone();
+            self.widgets.unread_filter_button.connect_toggled(move |button| {
+                app.state.borrow_mut().unread_only = button.is_active();
+                app.refresh_message_list();
+            });
+        }
+
         // Flag toggle.
         {
             let app = self.clone();
@@ -366,14 +400,14 @@ impl App {
         let window = self.widgets.window.clone();
         let backend = self.backend.clone();
         let config = self.config.clone();
-        let outer_split = self.widgets.outer_split.clone();
-        let inner_split = self.widgets.inner_split.clone();
+        let outer_paned = self.widgets.outer_paned.clone();
+        let inner_paned = self.widgets.inner_paned.clone();
         window.connect_close_request(move |_| {
             backend.borrow().shutdown();
             {
                 let mut config = config.borrow_mut();
-                config.sidebar_width_fraction = outer_split.sidebar_width_fraction();
-                config.message_list_width_fraction = inner_split.sidebar_width_fraction();
+                config.sidebar_width = outer_paned.position();
+                config.message_list_width = inner_paned.position();
                 if let Err(e) = config.save() {
                     log::warn!("could not save the window layout: {e:#}");
                 }
@@ -487,10 +521,12 @@ impl App {
             }
 
             Event::Mailboxes { account_id, mailboxes } => {
+                crate::cache::store_mailboxes(&account_id, &mailboxes);
                 {
                     let mut state = self.state.borrow_mut();
                     state.mailboxes.insert(account_id.clone(), mailboxes);
                 }
+                self.clear_activity(&account_id);
                 self.rebuild_sidebar();
                 self.select_first_inbox_if_idle();
 
@@ -519,7 +555,11 @@ impl App {
                     );
                     self.backend.borrow().send(
                         &account_id,
-                        Command::LoadMessages { mailbox: path, limit: page_size, offset: 0 },
+                        Command::LoadMessages { mailbox: path.clone(), limit: page_size, offset: 0 },
+                    );
+                    self.set_activity(
+                        &account_id,
+                        format!("Sincronizzazione — {}", self.describe_folder(&account_id, &path)),
                     );
                 }
             }
@@ -582,7 +622,7 @@ impl App {
                         crate::cache::store_summaries(&account_id, &mailbox, bucket);
                     }
                 }
-                self.widgets.spinner.set_visible(false);
+                self.clear_activity(&account_id);
                 self.refresh_message_list();
                 self.apply_preselection();
             }
@@ -691,11 +731,12 @@ impl App {
                 self.toast("Messaggio inviato");
                 // The copy we filed in Sent changes that folder's counts.
                 self.backend.borrow().send(&account_id, Command::LoadMailboxes);
+                self.set_activity(&account_id, "Aggiornamento delle cartelle…".to_string());
             }
 
             Event::Error { context, detail, account_id } => {
                 log::warn!("[{account_id}] {context}: {detail}");
-                self.widgets.spinner.set_visible(false);
+                self.clear_activity(&account_id);
 
                 // A message that failed to open belongs in the reading pane;
                 // everything else is an account-level problem for the banner.
@@ -831,6 +872,8 @@ impl App {
                 self.state.borrow_mut().selecting_programmatically = false;
             }
         }
+
+        crate::badge::set_unread_count(self.state.borrow().total_inbox_unread());
     }
 
     /// Open on an inbox rather than on an empty pane.
@@ -904,11 +947,49 @@ impl App {
         self.widgets.folder_title.set_title(&title);
         self.widgets.folder_title.set_subtitle("Caricamento…");
         self.widgets.message_view.show_empty();
-        self.widgets.spinner.set_visible(true);
         self.set_actions_enabled(false);
         self.preload_from_cache(&target);
         self.refresh_message_list();
         self.request_messages(&target);
+    }
+
+    /// Restore every account's last known folder list before a single
+    /// network command has gone out, so the sidebar can populate and
+    /// [`select_first_inbox_if_idle`](Self::select_first_inbox_if_idle) has
+    /// something to land on immediately instead of waiting on the network.
+    fn preload_mailboxes_from_cache(self: &Rc<Self>) {
+        let mut state = self.state.borrow_mut();
+        for account in state.accounts.clone() {
+            if let Some(cached) = crate::cache::load_mailboxes(&account.id) {
+                state.mailboxes.insert(account.id, cached);
+            }
+        }
+    }
+
+    /// Show every account's last known inbox at startup, before even the
+    /// folder list has come back. "INBOX" is the one mailbox name the IMAP
+    /// protocol guarantees exists under that literal spelling on every
+    /// server, so it is the only folder worth guessing at before any account
+    /// has told us its real folder paths. A slow or stalled connection would
+    /// otherwise leave the window showing "no messages" for as long as it
+    /// takes to time out.
+    ///
+    /// Only fills in accounts a real target selection hasn't already
+    /// populated with accurate data, so this can never clobber it with a
+    /// guess.
+    fn preload_inboxes_from_cache(self: &Rc<Self>) {
+        let mut state = self.state.borrow_mut();
+        for account in state.accounts.clone() {
+            if state.buckets.contains_key(&account.id) {
+                continue;
+            }
+            if let Some(cached) = crate::cache::load_summaries(&account.id, "INBOX") {
+                state.buckets.insert(account.id, cached);
+            }
+        }
+        state.remerge();
+        drop(state);
+        self.refresh_message_list();
     }
 
     /// Show whatever was cached from the last time this target was open,
@@ -950,6 +1031,7 @@ impl App {
                     account_id,
                     Command::LoadMessages { mailbox: path.clone(), limit: page_size, offset: 0 },
                 );
+                self.set_activity(account_id, format!("Sincronizzazione — {}", self.describe_folder(account_id, path)));
             }
             FolderTarget::Smart(_) => {
                 let targets: Vec<(String, String)> = {
@@ -971,7 +1053,11 @@ impl App {
                 for (account_id, path) in targets {
                     backend.send(
                         &account_id,
-                        Command::LoadMessages { mailbox: path, limit: page_size, offset: 0 },
+                        Command::LoadMessages { mailbox: path.clone(), limit: page_size, offset: 0 },
+                    );
+                    self.set_activity(
+                        &account_id,
+                        format!("Sincronizzazione — {}", self.describe_folder(&account_id, &path)),
                     );
                 }
             }
@@ -1013,6 +1099,10 @@ impl App {
         };
 
         for (account_id, path, offset) in requests {
+            self.set_activity(
+                &account_id,
+                format!("Caricamento altri messaggi — {}", self.describe_folder(&account_id, &path)),
+            );
             backend.send(
                 &account_id,
                 Command::LoadMessages { mailbox: path, limit: page_size, offset },
@@ -1024,15 +1114,22 @@ impl App {
         let Some(target) = self.state.borrow().current_target.clone() else {
             return;
         };
-        self.widgets.spinner.set_visible(true);
 
         {
             let backend = self.backend.borrow();
             match &target {
                 FolderTarget::Mailbox { account_id, .. } => {
-                    backend.send(account_id, Command::LoadMailboxes)
+                    backend.send(account_id, Command::LoadMailboxes);
+                    self.set_activity(account_id, "Aggiornamento delle cartelle…".to_string());
                 }
-                FolderTarget::Smart(_) => backend.broadcast(Command::LoadMailboxes),
+                FolderTarget::Smart(_) => {
+                    backend.broadcast(Command::LoadMailboxes);
+                    let ids: Vec<String> =
+                        self.state.borrow().accounts.iter().map(|a| a.id.clone()).collect();
+                    for id in ids {
+                        self.set_activity(&id, "Aggiornamento delle cartelle…".to_string());
+                    }
+                }
             }
         }
 
@@ -1076,11 +1173,13 @@ impl App {
         let show_account =
             state.current_target.as_ref().map(FolderTarget::spans_accounts).unwrap_or(false);
 
+        let unread_only = state.unread_only;
         let visible: Vec<usize> = state
             .messages
             .iter()
             .enumerate()
             .filter(|(_, message)| smart.map(|k| k.accepts(message)).unwrap_or(true))
+            .filter(|(_, message)| !unread_only || !message.seen)
             .filter(|(_, message)| matches_search(message, &needle))
             .map(|(index, _)| index)
             .collect();
@@ -1093,6 +1192,7 @@ impl App {
             .filter(|m| !m.seen)
             .count();
 
+        let app = self.clone();
         let rows_to_add: Vec<gtk::ListBoxRow> = visible
             .iter()
             .filter_map(|i| state.messages.get(*i))
@@ -1102,7 +1202,13 @@ impl App {
                 } else {
                     None
                 };
-                rows::message_row(message, account.as_deref())
+                let app = app.clone();
+                let account_id = message.account_id.clone();
+                let mailbox = message.mailbox.clone();
+                let uid = message.uid;
+                rows::message_row(message, account.as_deref(), move |action| {
+                    app.handle_swipe_action(&account_id, &mailbox, uid, action);
+                })
             })
             .collect();
         drop(state);
@@ -1249,31 +1355,45 @@ impl App {
         Some((summary.account_id.clone(), summary.mailbox.clone(), summary.uid))
     }
 
-    fn set_flag_on_selection(self: &Rc<Self>, flag: &str, on: bool) {
-        let Some((account_id, mailbox, uid)) = self.selected_message() else { return };
+    /// Set a flag on a specific message, independent of what is selected —
+    /// used both by the selection-driven actions and by swiping a row that
+    /// need not be the selected one.
+    fn set_flag_on(self: &Rc<Self>, account_id: &str, mailbox: &str, uid: u32, flag: &str, on: bool) {
         self.backend.borrow().send(
-            &account_id,
-            Command::SetFlag { mailbox, uid, flag: flag.to_string(), on },
+            account_id,
+            Command::SetFlag { mailbox: mailbox.to_string(), uid, flag: flag.to_string(), on },
         );
     }
 
-    fn toggle_read_on_selection(self: &Rc<Self>) {
-        let Some(row) = self.widgets.message_list.selected_row() else { return };
-        let seen = {
-            let state = self.state.borrow();
-            state.selected_summary(row.index() as usize).map(|s| s.seen)
-        };
-        let Some(seen) = seen else { return };
-        self.set_flag_on_selection("\\Seen", !seen);
+    fn set_flag_on_selection(self: &Rc<Self>, flag: &str, on: bool) {
+        let Some((account_id, mailbox, uid)) = self.selected_message() else { return };
+        self.set_flag_on(&account_id, &mailbox, uid, flag, on);
     }
 
-    fn move_selection_to(self: &Rc<Self>, kind: MailboxKind) {
+    fn toggle_read(self: &Rc<Self>, account_id: &str, mailbox: &str, uid: u32) {
+        let seen = {
+            let state = self.state.borrow();
+            state
+                .messages
+                .iter()
+                .find(|m| m.account_id == account_id && m.mailbox == mailbox && m.uid == uid)
+                .map(|m| m.seen)
+        };
+        let Some(seen) = seen else { return };
+        self.set_flag_on(account_id, mailbox, uid, "\\Seen", !seen);
+    }
+
+    fn toggle_read_on_selection(self: &Rc<Self>) {
         let Some((account_id, mailbox, uid)) = self.selected_message() else { return };
+        self.toggle_read(&account_id, &mailbox, uid);
+    }
+
+    fn move_to(self: &Rc<Self>, account_id: &str, mailbox: &str, uid: u32, kind: MailboxKind) {
         let target = {
             let state = self.state.borrow();
             state
                 .mailboxes
-                .get(&account_id)
+                .get(account_id)
                 .and_then(|list| list.iter().find(|m| m.kind == kind))
                 .map(|m| m.path.clone())
         };
@@ -1284,14 +1404,43 @@ impl App {
         if target == mailbox {
             return;
         }
+        self.backend.borrow().send(
+            account_id,
+            Command::MoveMessage { mailbox: mailbox.to_string(), uid, target },
+        );
+    }
+
+    fn move_selection_to(self: &Rc<Self>, kind: MailboxKind) {
+        let Some((account_id, mailbox, uid)) = self.selected_message() else { return };
+        self.move_to(&account_id, &mailbox, uid, kind);
+    }
+
+    fn delete_message(self: &Rc<Self>, account_id: &str, mailbox: &str, uid: u32) {
         self.backend
             .borrow()
-            .send(&account_id, Command::MoveMessage { mailbox, uid, target });
+            .send(account_id, Command::DeleteMessage { mailbox: mailbox.to_string(), uid });
     }
 
     fn delete_selection(self: &Rc<Self>) {
         let Some((account_id, mailbox, uid)) = self.selected_message() else { return };
-        self.backend.borrow().send(&account_id, Command::DeleteMessage { mailbox, uid });
+        self.delete_message(&account_id, &mailbox, uid);
+    }
+
+    /// Dispatch a swipe/long-press action from a message row to the
+    /// matching backend command.
+    fn handle_swipe_action(
+        self: &Rc<Self>,
+        account_id: &str,
+        mailbox: &str,
+        uid: u32,
+        action: rows::SwipeAction,
+    ) {
+        match action {
+            rows::SwipeAction::ToggleRead => self.toggle_read(account_id, mailbox, uid),
+            rows::SwipeAction::Flag => self.set_flag_on(account_id, mailbox, uid, "\\Flagged", true),
+            rows::SwipeAction::Archive => self.move_to(account_id, mailbox, uid, MailboxKind::Archive),
+            rows::SwipeAction::Delete => self.delete_message(account_id, mailbox, uid),
+        }
     }
 
     /// The account whose mailbox is currently open, falling back to the first
@@ -1369,10 +1518,37 @@ impl App {
 
         let app = self.clone();
         let account_id = account.id.clone();
-        compose::open(&self.widgets.window, kind, &account, prefilled, move |outgoing| {
-            app.toast("Invio in corso…");
-            app.backend.borrow().send(&account_id, Command::Send { outgoing });
-        });
+        let known_contacts = self.known_contacts();
+        compose::open(
+            &self.widgets.window,
+            kind,
+            &account,
+            prefilled,
+            known_contacts,
+            move |outgoing| {
+                app.toast("Invio in corso…");
+                app.backend.borrow().send(&account_id, Command::Send { outgoing });
+            },
+        );
+    }
+
+    /// Addresses already seen among the currently loaded messages, deduped
+    /// by address, for the compose window's suggestion popovers.
+    fn known_contacts(&self) -> Vec<Mailaddr> {
+        let state = self.state.borrow();
+        let mut seen = std::collections::HashSet::new();
+        let mut contacts = Vec::new();
+        for message in &state.messages {
+            for addr in std::iter::once(&message.from).chain(message.to.iter()) {
+                if addr.address.trim().is_empty() {
+                    continue;
+                }
+                if seen.insert(addr.address.to_lowercase()) {
+                    contacts.push(addr.clone());
+                }
+            }
+        }
+        contacts
     }
 
     fn set_actions_enabled(&self, enabled: bool) {
@@ -1384,6 +1560,43 @@ impl App {
 
     fn toast(&self, text: &str) {
         self.widgets.toast_overlay.add_toast(adw::Toast::new(text));
+    }
+
+    // --------------------------------------------------------- status bar
+
+    /// Human label for a sync in progress, e.g. "Lavoro — In arrivo".
+    fn describe_folder(&self, account_id: &str, path: &str) -> String {
+        let state = self.state.borrow();
+        let account = state.account_label(account_id).unwrap_or_else(|| account_id.to_string());
+        let folder =
+            state.mailbox(account_id, path).map(|m| m.name.clone()).unwrap_or_else(|| path.to_string());
+        format!("{account} — {folder}")
+    }
+
+    fn set_activity(self: &Rc<Self>, account_id: &str, text: String) {
+        self.state.borrow_mut().activity.insert(account_id.to_string(), text);
+        self.refresh_status_bar();
+    }
+
+    fn clear_activity(self: &Rc<Self>, account_id: &str) {
+        self.state.borrow_mut().activity.remove(account_id);
+        self.refresh_status_bar();
+    }
+
+    /// Reflect `state.activity` in the bottom status bar: spinning and
+    /// describing whatever is in flight, or idle when nothing is.
+    fn refresh_status_bar(self: &Rc<Self>) {
+        let state = self.state.borrow();
+        if state.activity.is_empty() {
+            self.widgets.status_spinner.set_visible(false);
+            self.widgets.status_spinner.set_spinning(false);
+            self.widgets.status_label.set_label("Pronto");
+        } else {
+            self.widgets.status_spinner.set_visible(true);
+            self.widgets.status_spinner.set_spinning(true);
+            let text = state.activity.values().cloned().collect::<Vec<_>>().join("  ·  ");
+            self.widgets.status_label.set_label(&text);
+        }
     }
 }
 
@@ -1480,6 +1693,11 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
     let sidebar_header = adw::HeaderBar::new();
     sidebar_header.set_title_widget(Some(&adw::WindowTitle::new("Caselle", "")));
     sidebar_header.pack_end(&menu_button);
+    // Only the rightmost column (the reader) gets the window's close button;
+    // GtkPaned, unlike AdwNavigationSplitView, has no notion of which pane is
+    // "outermost" and gives every header bar its own by default.
+    sidebar_header.set_show_start_title_buttons(false);
+    sidebar_header.set_show_end_title_buttons(false);
 
     let sidebar_view = adw::ToolbarView::new();
     sidebar_view.add_top_bar(&sidebar_header);
@@ -1518,10 +1736,6 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
 
     let folder_title = adw::WindowTitle::new("Posta", "");
 
-    let spinner = gtk::Spinner::new();
-    spinner.set_spinning(true);
-    spinner.set_visible(false);
-
     let search_button = gtk::ToggleButton::builder()
         .icon_name("system-search-symbolic")
         .tooltip_text("Cerca (Ctrl+F)")
@@ -1544,12 +1758,32 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
         .action_name("win.compose")
         .build();
 
+    let sidebar_toggle = gtk::ToggleButton::builder()
+        .icon_name("sidebar-show-symbolic")
+        .tooltip_text("Mostra/nascondi le caselle")
+        .active(true)
+        .build();
+    {
+        let sidebar_view = sidebar_view.clone();
+        sidebar_toggle.connect_toggled(move |button| {
+            sidebar_view.set_visible(button.is_active());
+        });
+    }
+
+    let unread_filter_button = gtk::ToggleButton::builder()
+        .icon_name("mailview-unread-symbolic")
+        .tooltip_text("Mostra solo i non letti")
+        .build();
+
     let list_header = adw::HeaderBar::new();
     list_header.set_title_widget(Some(&folder_title));
+    list_header.pack_start(&sidebar_toggle);
     list_header.pack_start(&refresh_button);
     list_header.pack_start(&compose_button);
     list_header.pack_end(&search_button);
-    list_header.pack_end(&spinner);
+    list_header.pack_end(&unread_filter_button);
+    list_header.set_show_start_title_buttons(false);
+    list_header.set_show_end_title_buttons(false);
 
     let list_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     list_body.append(&search_bar);
@@ -1628,19 +1862,37 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
     reader_view.set_content(Some(&message_view.root));
 
     // ---- assemble the three panes ----------------------------------------
-    let inner_split = adw::NavigationSplitView::new();
-    inner_split.set_sidebar(Some(&adw::NavigationPage::new(&list_view, "Messaggi")));
-    inner_split.set_content(Some(&adw::NavigationPage::new(&reader_view, "Messaggio")));
-    inner_split.set_min_sidebar_width(330.0);
-    inner_split.set_max_sidebar_width(460.0);
-    inner_split.set_sidebar_width_fraction(config.message_list_width_fraction);
+    // Plain GtkPaned, not AdwNavigationSplitView: the latter only ever
+    // offered a *preferred* width and never grew a drag handle, so nothing
+    // the user did in the window could actually resize a pane. Paned gives a
+    // real, mouse-draggable handle between each pair of panes; the adaptive
+    // collapse-on-narrow-window behaviour is traded away for that.
+    list_view.set_size_request(280, -1);
+    reader_view.set_size_request(320, -1);
+    let inner_paned = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(&list_view)
+        .end_child(&reader_view)
+        .resize_start_child(false)
+        .shrink_start_child(false)
+        .resize_end_child(true)
+        .shrink_end_child(false)
+        .wide_handle(true)
+        .position(config.message_list_width)
+        .build();
 
-    let outer_split = adw::NavigationSplitView::new();
-    outer_split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar_view, "Caselle")));
-    outer_split.set_content(Some(&adw::NavigationPage::new(&inner_split, "Posta")));
-    outer_split.set_min_sidebar_width(220.0);
-    outer_split.set_max_sidebar_width(300.0);
-    outer_split.set_sidebar_width_fraction(config.sidebar_width_fraction);
+    sidebar_view.set_size_request(180, -1);
+    let outer_paned = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(&sidebar_view)
+        .end_child(&inner_paned)
+        .resize_start_child(false)
+        .shrink_start_child(false)
+        .resize_end_child(true)
+        .shrink_end_child(false)
+        .wide_handle(true)
+        .position(config.sidebar_width)
+        .build();
 
     let banner = adw::Banner::new("");
     banner.set_revealed(false);
@@ -1650,10 +1902,33 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
         banner.connect_button_clicked(move |_| banner_clone.set_revealed(false));
     }
 
+    // ---- bottom status bar -------------------------------------------
+    let status_spinner = gtk::Spinner::new();
+    status_spinner.set_spinning(true);
+    status_spinner.set_visible(false);
+
+    let status_label = gtk::Label::new(Some("Pronto"));
+    status_label.add_css_class("caption");
+    status_label.add_css_class("dim-label");
+    status_label.set_halign(gtk::Align::Start);
+    status_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    status_label.set_hexpand(true);
+
+    let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    status_bar.add_css_class("mail-status-bar");
+    status_bar.set_margin_start(10);
+    status_bar.set_margin_end(10);
+    status_bar.set_margin_top(3);
+    status_bar.set_margin_bottom(3);
+    status_bar.append(&status_spinner);
+    status_bar.append(&status_label);
+
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&banner);
-    content.append(&outer_split);
-    outer_split.set_vexpand(true);
+    content.append(&outer_paned);
+    content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    content.append(&status_bar);
+    outer_paned.set_vexpand(true);
 
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&content));
@@ -1686,10 +1961,12 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
         banner,
         toast_overlay,
         flag_button,
+        unread_filter_button,
         action_buttons,
-        spinner,
-        outer_split,
-        inner_split,
+        status_spinner,
+        status_label,
+        outer_paned,
+        inner_paned,
     }
 }
 

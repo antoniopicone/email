@@ -8,17 +8,27 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const ICON_DIR: &str = "data/icons/scalable/actions";
+const ICON_DIR: &str = "data/icons";
 const MANIFEST: &str = "data/mailview.gresource.xml";
+
+/// `cargo:rerun-if-changed` needs every source file named, not just the
+/// top-level directory, or edits to a nested icon go unnoticed.
+fn watch_recursively(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            watch_recursively(&path);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+}
 
 fn main() {
     println!("cargo:rerun-if-changed={MANIFEST}");
     println!("cargo:rerun-if-changed=build.rs");
-    if let Ok(entries) = fs::read_dir(ICON_DIR) {
-        for entry in entries.flatten() {
-            println!("cargo:rerun-if-changed={}", entry.path().display());
-        }
-    }
+    watch_recursively(Path::new(ICON_DIR));
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is always set by cargo"));
     let target = out_dir.join("mailview.gresource");

@@ -203,3 +203,15 @@ row:selected .unread-dot {
   font-size: 0.8rem;
   color: alpha(currentColor, 0.55);
 }
+
+/* --------------------------------------------------------------- status bar */
+
+.mail-status-bar {
+  min-height: 22px;
+  background: @window_bg_color;
+}
+
+.mail-status-bar spinner {
+  min-width: 14px;
+  min-height: 14px;
+}

@@ -1,8 +1,10 @@
 //! MailView — a GTK4/libadwaita mail client for the GNOME desktop.
 
 mod backend;
+mod badge;
 mod cache;
 mod config;
+mod contacts;
 mod demo;
 mod goa;
 mod html;

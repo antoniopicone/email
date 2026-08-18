@@ -1,12 +1,16 @@
 //! The compose window, used for new messages, replies and forwards.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gtk4 as gtk;
+use gtk::glib;
 use gtk::prelude::*;
 use libadwaita as adw;
 use adw::prelude::*;
 
-use crate::backend::smtp::Outgoing;
-use crate::model::{Account, Message};
+use crate::backend::smtp::{parse_recipients, Outgoing};
+use crate::model::{Account, Mailaddr, Message};
 
 /// What the user asked for, which decides how the fields are prefilled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,12 +110,112 @@ pub fn prefill(kind: ComposeKind, account: &Account, message: Option<&Message>) 
     }
 }
 
+/// Live syntax validation plus a contact-suggestion popover on a recipient
+/// field. `contacts` is shared across all three recipient fields and can
+/// grow after the window is already open, once the (async, best-effort)
+/// address book lookup returns.
+fn setup_recipient_field(row: &adw::EntryRow, contacts: &Rc<RefCell<Vec<Mailaddr>>>) {
+    // Validation: an empty field is fine (nothing to send yet), anything
+    // else must parse the same way the SMTP send path will parse it.
+    {
+        let row = row.clone();
+        row.connect_changed(move |row| {
+            let valid = row.text().trim().is_empty() || parse_recipients(&row.text()).is_ok();
+            if valid {
+                row.remove_css_class("error");
+            } else {
+                row.add_css_class("error");
+            }
+        });
+    }
+
+    // Suggestions, matched against whatever is typed after the last comma.
+    let popover = gtk::Popover::builder().autohide(false).has_arrow(false).build();
+    popover.set_parent(row);
+    let suggestion_list = gtk::ListBox::new();
+    suggestion_list.add_css_class("boxed-list");
+    popover.set_child(Some(&suggestion_list));
+
+    {
+        let row = row.clone();
+        let popover = popover.clone();
+        let suggestion_list = suggestion_list.clone();
+        let contacts = contacts.clone();
+        row.connect_changed(move |row| {
+            while let Some(child) = suggestion_list.first_child() {
+                suggestion_list.remove(&child);
+            }
+
+            let text = row.text();
+            let fragment = text.rsplit(',').next().unwrap_or("").trim().to_lowercase();
+            if fragment.is_empty() {
+                popover.popdown();
+                return;
+            }
+
+            let matches: Vec<Mailaddr> = contacts
+                .borrow()
+                .iter()
+                .filter(|c| {
+                    c.address.to_lowercase().contains(&fragment)
+                        || c.name.to_lowercase().contains(&fragment)
+                })
+                .take(6)
+                .cloned()
+                .collect();
+
+            if matches.is_empty() {
+                popover.popdown();
+                return;
+            }
+
+            for contact in &matches {
+                let title = if contact.name.trim().is_empty() {
+                    contact.address.clone()
+                } else {
+                    contact.name.clone()
+                };
+                let suggestion = adw::ActionRow::builder()
+                    .title(title)
+                    .subtitle(&contact.address)
+                    .activatable(true)
+                    .build();
+                suggestion_list.append(&suggestion);
+            }
+            popover.popup();
+        });
+    }
+
+    {
+        let row = row.clone();
+        let popover = popover.clone();
+        suggestion_list.connect_row_activated(move |_, activated| {
+            let Some(picked) = activated.downcast_ref::<adw::ActionRow>() else { return };
+            let address = picked.subtitle().map(|s| s.to_string()).unwrap_or_default();
+
+            let current = row.text().to_string();
+            let prefix = match current.rfind(',') {
+                Some(idx) => format!("{} ", &current[..=idx]),
+                None => String::new(),
+            };
+            row.set_text(&format!("{prefix}{address}, "));
+            row.set_position(-1);
+            popover.popdown();
+            row.grab_focus();
+        });
+    }
+}
+
 /// Open the compose window. `on_send` receives the finished message.
+/// `known_contacts` seeds the suggestion popovers with addresses already
+/// seen in loaded mail; GNOME's local address book, when reachable, is
+/// merged in shortly after the window opens.
 pub fn open<F>(
     parent: &impl IsA<gtk::Window>,
     kind: ComposeKind,
     account: &Account,
     prefilled: Outgoing,
+    known_contacts: Vec<Mailaddr>,
     on_send: F,
 ) where
     F: Fn(Outgoing) + 'static,
@@ -124,11 +228,58 @@ pub fn open<F>(
         .default_height(560)
         .build();
 
+    let contacts = Rc::new(RefCell::new(known_contacts));
+    {
+        let contacts = contacts.clone();
+        glib::spawn_future_local(async move {
+            let mut fetched = crate::contacts::from_local_address_book().await;
+            if fetched.is_empty() {
+                return;
+            }
+            let mut current = contacts.borrow_mut();
+            let known: std::collections::HashSet<String> =
+                current.iter().map(|c| c.address.to_lowercase()).collect();
+            fetched.retain(|c| !known.contains(&c.address.to_lowercase()));
+            current.extend(fetched);
+        });
+    }
+
     let to_row = adw::EntryRow::builder().title("A").build();
     to_row.set_text(&prefilled.to);
+    setup_recipient_field(&to_row, &contacts);
 
     let cc_row = adw::EntryRow::builder().title("Cc").build();
     cc_row.set_text(&prefilled.cc);
+    cc_row.set_visible(!prefilled.cc.trim().is_empty());
+    setup_recipient_field(&cc_row, &contacts);
+
+    let bcc_row = adw::EntryRow::builder().title("Ccn").build();
+    bcc_row.set_visible(false);
+    setup_recipient_field(&bcc_row, &contacts);
+
+    // Small closed-by-default disclosure toggles on the "A" row, so Cc and
+    // Ccn stay out of the way until asked for.
+    let cc_toggle = gtk::ToggleButton::builder()
+        .label("Cc")
+        .valign(gtk::Align::Center)
+        .active(!prefilled.cc.trim().is_empty())
+        .css_classes(["flat"])
+        .build();
+    {
+        let cc_row = cc_row.clone();
+        cc_toggle.connect_toggled(move |button| cc_row.set_visible(button.is_active()));
+    }
+    let bcc_toggle = gtk::ToggleButton::builder()
+        .label("Ccn")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    {
+        let bcc_row = bcc_row.clone();
+        bcc_toggle.connect_toggled(move |button| bcc_row.set_visible(button.is_active()));
+    }
+    to_row.add_suffix(&cc_toggle);
+    to_row.add_suffix(&bcc_toggle);
 
     let subject_row = adw::EntryRow::builder().title("Oggetto").build();
     subject_row.set_text(&prefilled.subject);
@@ -136,6 +287,7 @@ pub fn open<F>(
     let fields = adw::PreferencesGroup::new();
     fields.add(&to_row);
     fields.add(&cc_row);
+    fields.add(&bcc_row);
     fields.add(&subject_row);
     fields.set_margin_top(12);
     fields.set_margin_bottom(6);
@@ -166,18 +318,42 @@ pub fn open<F>(
 
     let cancel_button = gtk::Button::builder().label("Annulla").build();
 
+    let window_title = adw::WindowTitle::new(kind.title(), &account.email);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(kind.title(), &account.email)));
-    header.pack_start(&cancel_button);
-    header.pack_end(&send_button);
+    header.set_title_widget(Some(&window_title));
+
+    // The window title follows the subject once the user leaves the field,
+    // the way most mail clients label a compose window — but only once
+    // there is something to show, and only after the field is a considered
+    // choice (focus-out), not on every keystroke.
+    {
+        let window = window.clone();
+        let window_title = window_title.clone();
+        let subject_row_handle = subject_row.clone();
+        let default_title = kind.title().to_string();
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave(move |_| {
+            let subject = subject_row_handle.text();
+            let trimmed = subject.trim();
+            let title = if trimmed.is_empty() { default_title.as_str() } else { trimmed };
+            window_title.set_title(title);
+            window.set_title(Some(title));
+        });
+        subject_row.add_controller(focus);
+    }
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&fields);
     content.append(&body_scroll);
 
+    let action_bar = gtk::ActionBar::new();
+    action_bar.pack_start(&cancel_button);
+    action_bar.pack_end(&send_button);
+
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&content));
+    toolbar.add_bottom_bar(&action_bar);
 
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&toolbar));
@@ -192,6 +368,7 @@ pub fn open<F>(
         let window = window.clone();
         let to_row = to_row.clone();
         let cc_row = cc_row.clone();
+        let bcc_row = bcc_row.clone();
         let subject_row = subject_row.clone();
         let body = body.clone();
         let in_reply_to = prefilled.in_reply_to.clone();
@@ -206,6 +383,7 @@ pub fn open<F>(
             let outgoing = Outgoing {
                 to: to_row.text().to_string(),
                 cc: cc_row.text().to_string(),
+                bcc: bcc_row.text().to_string(),
                 subject: subject_row.text().to_string(),
                 body: text,
                 in_reply_to: in_reply_to.clone(),
@@ -215,6 +393,18 @@ pub fn open<F>(
                 toast_overlay.add_toast(adw::Toast::new("Indica almeno un destinatario"));
                 to_row.grab_focus();
                 return;
+            }
+
+            for (row, field, label) in
+                [(&to_row, &outgoing.to, "A"), (&cc_row, &outgoing.cc, "Cc"), (&bcc_row, &outgoing.bcc, "Ccn")]
+            {
+                if !field.trim().is_empty() && parse_recipients(field).is_err() {
+                    toast_overlay.add_toast(adw::Toast::new(&format!(
+                        "Controlla gli indirizzi nel campo {label}"
+                    )));
+                    row.grab_focus();
+                    return;
+                }
             }
 
             on_send(outgoing);

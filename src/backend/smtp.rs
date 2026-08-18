@@ -16,6 +16,7 @@ use crate::model::{Account, Credentials};
 pub struct Outgoing {
     pub to: String,
     pub cc: String,
+    pub bcc: String,
     pub subject: String,
     pub body: String,
     /// `Message-ID` of the message being answered, when this is a reply.
@@ -23,7 +24,10 @@ pub struct Outgoing {
 }
 
 /// Split a comma- or semicolon-separated recipient list into mailboxes.
-fn parse_recipients(list: &str) -> Result<Vec<LettreMailbox>> {
+///
+/// Also used by the compose window to validate a field's contents live, so
+/// what turns green there is exactly what will parse at send time.
+pub fn parse_recipients(list: &str) -> Result<Vec<LettreMailbox>> {
     let mut out = Vec::new();
     for candidate in list.split([',', ';']) {
         let trimmed = candidate.trim();
@@ -51,6 +55,7 @@ pub fn build(account: &Account, outgoing: &Outgoing) -> Result<LettreMessage> {
         return Err(anyhow!("indica almeno un destinatario"));
     }
     let cc = parse_recipients(&outgoing.cc)?;
+    let bcc = parse_recipients(&outgoing.bcc)?;
 
     let mut builder = LettreMessage::builder().from(from).subject(&outgoing.subject);
     for mailbox in to {
@@ -58,6 +63,9 @@ pub fn build(account: &Account, outgoing: &Outgoing) -> Result<LettreMessage> {
     }
     for mailbox in cc {
         builder = builder.cc(mailbox);
+    }
+    for mailbox in bcc {
+        builder = builder.bcc(mailbox);
     }
     if let Some(reference) = &outgoing.in_reply_to {
         if !reference.trim().is_empty() {

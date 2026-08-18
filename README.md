@@ -9,9 +9,8 @@ integrazione con gli account online già configurati in GNOME.
 ## Cosa fa
 
 - **Layout a tre pannelli** come Apple Mail: caselle a sinistra, elenco dei
-  messaggi al centro, messaggio a destra. I pannelli si riducono in modo
-  responsive sugli schermi stretti grazie a `AdwNavigationSplitView` e sono
-  ridimensionabili trascinandone il bordo; la larghezza scelta viene
+  messaggi al centro, messaggio a destra. Ogni bordo tra i pannelli è
+  trascinabile con il mouse (`GtkPaned`); la larghezza scelta viene
   ricordata alla chiusura dell'app.
 - **Cache locale dei messaggi**: l'elenco di ogni cartella e i messaggi già
   aperti restano su disco, così la cartella mostra subito qualcosa mentre la
@@ -26,6 +25,15 @@ integrazione con gli account online già configurati in GNOME.
   non compare.
 - **Set di icone proprio**, disegnato sul linguaggio visivo di Mail per iOS e
   compilato dentro il binario, quindi indipendente dal tema di sistema.
+- **Icona dell'applicazione** in stile Adwaita (busta su sfondo blu
+  sfumato), installabile con `tools/install.sh`.
+- **Badge dei messaggi da leggere** sull'icona nel dock/taskbar, per gli
+  ambienti che supportano il protocollo `com.canonical.Unity.LauncherEntry`
+  (es. Budgie, Cinnamon, Dash to Dock). Su GNOME Shell "di serie", senza
+  estensioni per le icone del dock, il segnale viene comunque inviato ma
+  nessuno lo mostra.
+- **Barra di stato** in fondo alla finestra, con uno spinner e il dettaglio
+  di quale casella si sta sincronizzando in questo momento.
 - **IMAP su TLS**, con STARTTLS opzionale per i server sulla porta 143.
 - **Gmail tramite XOAUTH2**: nessuna password da inserire e nessun flusso
   OAuth da gestire, il token arriva da GNOME Online Accounts.
@@ -38,9 +46,18 @@ integrazione con gli account online già configurati in GNOME.
 - **Lettura, risposta e inoltro**: risposta singola o a tutti con citazione del
   testo originale, invio via SMTP e copia archiviata nella cartella *Inviata*.
 - **Gestione dei messaggi**: archivia, elimina, segna come indesiderata,
-  contrassegna, segna come letto/da leggere.
+  contrassegna, segna come letto/da leggere — anche trascinando una riga
+  (swipe breve da sinistra: letto/da leggere; lungo da sinistra: contrassegna;
+  leggero da destra: archivia; lungo da destra: elimina) o tenendola premuta
+  per lo stesso elenco di azioni in una finestra modale.
+- **Filtro non letti** in cima all'elenco dei messaggi.
 - **Ricerca** istantanea su mittente, oggetto e anteprima.
 - **Allegati** elencati sotto al messaggio e salvabili con un clic.
+- **Composizione**: campi Cc e Ccn nascosti finché non servono, titolo della
+  finestra che segue l'oggetto una volta lasciato il campo, e suggerimenti
+  di indirizzi mentre si scrive nei campi A/Cc/Ccn — dai mittenti/destinatari
+  già visti nella posta caricata e, quando disponibile, dalla Rubrica di
+  GNOME (evolution-data-server).
 
 | Modalità scura | Composizione |
 | --- | --- |
@@ -70,7 +87,7 @@ python3 tools/make-icons.py
 
 ## Requisiti
 
-Sistema con GTK 4.12 o successivo, libadwaita 1.4+ e WebKitGTK 6.0.
+Sistema con GTK 4.12 o successivo, libadwaita 1.5+ e WebKitGTK 6.0.
 
 Su Debian/Ubuntu:
 
@@ -93,6 +110,16 @@ Serve inoltre una toolchain Rust recente (1.80 o successiva).
 ```bash
 cargo build --release
 ./target/release/mailview
+```
+
+Eseguito così, senza installarlo, MailView funziona a pieno regime ma
+compare nel dock/taskbar con un'icona generica: senza un `.desktop`
+installato lo shell non ha modo di risalire all'icona dell'applicazione.
+Per installare binario, `.desktop` e icona per il solo utente corrente
+(tutto sotto `~/.local`, nessun permesso di root):
+
+```bash
+tools/install.sh
 ```
 
 Per esplorare l'interfaccia senza configurare nulla — nessuna connessione di
@@ -128,8 +155,8 @@ Esempio di `config.toml`:
 theme = "system"              # "system", "light" o "dark"
 use_gnome_online_accounts = true
 page_size = 100                        # messaggi caricati per pagina (lazy load oltre)
-sidebar_width_fraction = 0.17          # larghezza del pannello caselle
-message_list_width_fraction = 0.34     # larghezza del pannello messaggi
+sidebar_width = 260                    # larghezza in pixel del pannello caselle
+message_list_width = 380               # larghezza in pixel del pannello messaggi
 
 [[accounts]]
 id = "imap:info@example.it"
@@ -162,6 +189,8 @@ src/
   model.rs             tipi condivisi (Account, Mailbox, MessageSummary, …)
   config.rs            impostazioni persistenti degli account manuali
   cache.rs             cache su disco di elenchi e messaggi scaricati
+  badge.rs             badge dei non letti sull'icona (Unity LauncherEntry)
+  contacts.rs          suggerimenti destinatari: posta vista + Rubrica GNOME
   goa.rs               GNOME Online Accounts via D-Bus (zbus)
   secrets.rs           password nel portachiavi (Secret Service)
   html.rs              sanitizzazione dei corpi HTML e resa in testo
@@ -180,10 +209,14 @@ src/
     accounts.rs        dialogo di aggiunta account
     style.css          foglio di stile
 data/
-  icons/               icone simboliche generate
+  icons/
+    scalable/actions/  icone simboliche generate
+    hicolor/           icona dell'applicazione, layout XDG per l'installazione
   mailview.gresource.xml
+  it.antoniopicone.MailView.desktop
 tools/
-  make-icons.py        generatore delle icone
+  make-icons.py        generatore delle icone simboliche
+  install.sh           installa binario, .desktop e icona in ~/.local
   screenshot.sh        cattura su display virtuale
 build.rs               compila le icone nel GResource
 ```

@@ -1,9 +1,107 @@
 //! Row widgets for the sidebar and the message list.
 
+use std::rc::Rc;
+
 use gtk4 as gtk;
 use gtk::prelude::*;
+use libadwaita as adw;
+use adw::prelude::*;
 
 use crate::model::{Mailbox, MessageSummary};
+
+/// The four quick actions reachable on a message row, either by dragging it
+/// (Mail-style: short/long from either edge) or through the long-press
+/// action sheet, for whoever is not dragging anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeAction {
+    ToggleRead,
+    Flag,
+    Archive,
+    Delete,
+}
+
+/// Past this many pixels a drag counts as a swipe at all.
+const SWIPE_SHORT: f64 = 60.0;
+/// Past this many pixels a swipe is the "long" gesture on its edge.
+const SWIPE_LONG: f64 = 160.0;
+/// How far the row is allowed to visibly shift while dragging — feedback
+/// that something is happening, not a real reveal-and-drop panel.
+const SWIPE_VISUAL_CAP: f64 = 96.0;
+
+/// Wires the swipe gestures and the long-press action sheet onto a message
+/// row. `on_action` fires with whichever of the four actions was picked,
+/// by either input method.
+fn attach_swipe_actions(
+    row: &gtk::ListBoxRow,
+    content: &gtk::Widget,
+    on_action: Rc<dyn Fn(SwipeAction)>,
+) {
+    let drag = gtk::GestureDrag::new();
+    {
+        let content = content.clone();
+        drag.connect_drag_update(move |_, offset_x, _| {
+            let shift = offset_x.clamp(-SWIPE_VISUAL_CAP, SWIPE_VISUAL_CAP);
+            content.set_margin_start(shift.max(0.0) as i32);
+            content.set_margin_end((-shift.min(0.0)) as i32);
+        });
+    }
+    {
+        let content = content.clone();
+        let on_action = on_action.clone();
+        drag.connect_drag_end(move |_, offset_x, _| {
+            content.set_margin_start(0);
+            content.set_margin_end(0);
+
+            let distance = offset_x.abs();
+            if distance < SWIPE_SHORT {
+                return;
+            }
+            let action = match (offset_x > 0.0, distance >= SWIPE_LONG) {
+                (true, false) => SwipeAction::ToggleRead,
+                (true, true) => SwipeAction::Flag,
+                (false, false) => SwipeAction::Archive,
+                (false, true) => SwipeAction::Delete,
+            };
+            on_action(action);
+        });
+    }
+    row.add_controller(drag);
+
+    let long_press = gtk::GestureLongPress::new();
+    {
+        let row = row.clone();
+        long_press.connect_pressed(move |_, _, _| {
+            show_action_sheet(&row, on_action.clone());
+        });
+    }
+    row.add_controller(long_press);
+}
+
+/// The "modal window" alternative to swiping: press and hold a row to see
+/// the same four actions as buttons.
+fn show_action_sheet(row: &gtk::ListBoxRow, on_action: Rc<dyn Fn(SwipeAction)>) {
+    let dialog = adw::AlertDialog::new(Some("Azioni sul messaggio"), None);
+    dialog.add_response("toggle-read", "Segna come letto/da leggere");
+    dialog.add_response("flag", "Contrassegna");
+    dialog.add_response("archive", "Archivia");
+    dialog.add_response("delete", "Elimina");
+    dialog.add_response("cancel", "Annulla");
+    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    dialog.set_close_response("cancel");
+
+    dialog.connect_response(None, move |_, response| {
+        let action = match response {
+            "toggle-read" => SwipeAction::ToggleRead,
+            "flag" => SwipeAction::Flag,
+            "archive" => SwipeAction::Archive,
+            "delete" => SwipeAction::Delete,
+            _ => return,
+        };
+        on_action(action);
+    });
+
+    dialog.present(Some(row));
+}
 
 /// A non-selectable heading that starts an account's group of mailboxes.
 pub fn section_header(title: &str, subtitle: &str) -> gtk::ListBoxRow {
@@ -100,7 +198,13 @@ pub fn smart_row(title: &str, icon_name: &str, unread: u32) -> gtk::ListBoxRow {
 
 /// `account` labels which account a message came from, shown only in the
 /// unified views where the list mixes several accounts together.
-pub fn message_row(message: &MessageSummary, account: Option<&str>) -> gtk::ListBoxRow {
+/// `on_swipe_action` fires when the user swipes the row or picks an action
+/// from the long-press sheet.
+pub fn message_row(
+    message: &MessageSummary,
+    account: Option<&str>,
+    on_swipe_action: impl Fn(SwipeAction) + 'static,
+) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
 
     let outer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -204,6 +308,7 @@ pub fn message_row(message: &MessageSummary, account: Option<&str>) -> gtk::List
 
     outer.append(&column);
     row.set_child(Some(&outer));
+    attach_swipe_actions(&row, outer.upcast_ref(), Rc::new(on_swipe_action));
     row
 }
 
