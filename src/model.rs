@@ -151,8 +151,6 @@ pub struct Mailbox {
     pub kind: MailboxKind,
     pub unread: u32,
     pub total: u32,
-    /// Nesting depth, used to indent nested folders in the sidebar.
-    pub depth: usize,
 }
 
 /// A parsed `From:`/`To:` entry.

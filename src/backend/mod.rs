@@ -222,7 +222,7 @@ fn connect_with_retry(account: &Account) -> anyhow::Result<ImapClient> {
         if attempt > 0 {
             thread::sleep(Duration::from_millis(500 * attempt));
         }
-        let credentials = match imap_client::resolve_credentials(account) {
+        let credentials = match imap_client::resolve_credentials(account, crate::goa::CredentialPurpose::Imap) {
             Ok(c) => c,
             Err(e) => {
                 last_error = Some(e);
@@ -298,7 +298,8 @@ fn handle_command(
         }
 
         Command::Send { outgoing } => {
-            let credentials = imap_client::resolve_credentials(account)?;
+            let credentials =
+                imap_client::resolve_credentials(account, crate::goa::CredentialPurpose::Smtp)?;
             let raw = smtp::send(account, &credentials, outgoing)?;
             // Best effort: a failed Sent copy must not look like a failed send.
             if let Err(e) = session.append_to_sent(&raw) {

@@ -84,7 +84,6 @@ fn mailboxes_for(account_id: &str) -> Vec<Mailbox> {
             kind: *kind,
             unread: *unread,
             total: *total,
-            depth: 0,
         })
         .collect()
 }

@@ -103,29 +103,63 @@ fn show_action_sheet(row: &gtk::ListBoxRow, on_action: Rc<dyn Fn(SwipeAction)>) 
     dialog.present(Some(row));
 }
 
-/// A non-selectable heading that starts an account's group of mailboxes.
-pub fn section_header(title: &str, subtitle: &str) -> gtk::ListBoxRow {
+/// A heading that starts an account's group of mailboxes, with a chevron
+/// that folds the group away. Not selectable like a folder row — clicking it
+/// toggles `on_toggle` instead of navigating anywhere.
+///
+/// Quiet by design: a working account says nothing under its name, and only
+/// a real connection problem earns a warning line — routine status text like
+/// "Connesso" would just be noise repeated for every account, every time.
+pub fn section_header(
+    title: &str,
+    has_error: bool,
+    collapsed: bool,
+    on_toggle: impl Fn() + 'static,
+) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     row.set_selectable(false);
     row.set_activatable(false);
     row.add_css_class("section-header");
 
-    let boxx = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    text.set_hexpand(true);
 
     let label = gtk::Label::new(Some(title));
     label.set_xalign(0.0);
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    boxx.append(&label);
+    text.append(&label);
 
-    if !subtitle.is_empty() {
-        let status = gtk::Label::new(Some(subtitle));
-        status.set_xalign(0.0);
+    if has_error {
+        let status = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         status.add_css_class("account-status");
-        status.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        boxx.append(&status);
+        status.add_css_class("account-status-error");
+
+        let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
+        status.append(&icon);
+
+        let label = gtk::Label::new(Some("Errore di connessione"));
+        label.set_xalign(0.0);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        status.append(&label);
+
+        text.append(&status);
     }
 
-    row.set_child(Some(&boxx));
+    let chevron = gtk::Image::from_icon_name(if collapsed {
+        "pan-end-symbolic"
+    } else {
+        "pan-down-symbolic"
+    });
+    chevron.add_css_class("dim-label");
+
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.append(&text);
+    content.append(&chevron);
+
+    let button = gtk::Button::builder().child(&content).css_classes(["flat"]).build();
+    button.connect_clicked(move |_| on_toggle());
+
+    row.set_child(Some(&button));
     row
 }
 
@@ -135,8 +169,7 @@ pub fn mailbox_row(mailbox: &Mailbox) -> gtk::ListBoxRow {
     row.add_css_class("mailbox-row");
 
     let boxx = gtk::Box::new(gtk::Orientation::Horizontal, 9);
-    // Nested folders line up under their parent.
-    boxx.set_margin_start(4 + (mailbox.depth as i32 * 14));
+    boxx.set_margin_start(4);
 
     let icon = gtk::Image::from_icon_name(mailbox.kind.icon());
     boxx.append(&icon);

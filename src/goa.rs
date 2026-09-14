@@ -204,7 +204,13 @@ pub async fn discover() -> Result<Vec<GoaAccount>> {
             }
         };
 
-        let display_name = {
+        // `PresentationIdentity` is the label Settings → Online Accounts
+        // actually lets the user rename (e.g. "Personale"); `Mail.Name` is a
+        // separate, rarely-edited property — the outgoing sender name, not
+        // an account nickname. Prefer the one the user can actually control.
+        let display_name = if !presentation_identity.is_empty() {
+            presentation_identity.clone()
+        } else {
             let name = as_string(mail, "Name");
             if name.is_empty() {
                 as_string(account, "ProviderName")
@@ -265,8 +271,29 @@ pub async fn access_token(object_path: &str) -> Result<String> {
     Ok(token)
 }
 
-/// Ask GOA for the stored password of a password-based account.
-pub async fn password(object_path: &str, id: &str) -> Result<String> {
+/// Which of an account's stored passwords to ask GOA for. `PasswordBased`
+/// accounts can keep separate secrets for IMAP and SMTP; `GetPassword` picks
+/// between them by this id, not by the account's own id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialPurpose {
+    Imap,
+    Smtp,
+}
+
+impl CredentialPurpose {
+    /// The literal id GOA's `PasswordBased.GetPassword` expects — see
+    /// `org.gnome.OnlineAccounts.PasswordBased`: known values are
+    /// `"imap-password"` and `"smtp-password"`, not the account's own id.
+    fn goa_id(&self) -> &'static str {
+        match self {
+            CredentialPurpose::Imap => "imap-password",
+            CredentialPurpose::Smtp => "smtp-password",
+        }
+    }
+}
+
+/// Ask GOA for one of the stored passwords of a password-based account.
+pub async fn password(object_path: &str, purpose: CredentialPurpose) -> Result<String> {
     let connection = zbus::Connection::session().await.context("connecting to the session bus")?;
     let proxy = PasswordBasedProxy::builder(&connection)
         .path(object_path.to_string())?
@@ -274,9 +301,9 @@ pub async fn password(object_path: &str, id: &str) -> Result<String> {
         .await
         .context("building the password proxy")?;
     proxy
-        .get_password(id)
+        .get_password(purpose.goa_id())
         .await
-        .with_context(|| format!("requesting the password for {object_path}"))
+        .with_context(|| format!("requesting the {} for {object_path}", purpose.goa_id()))
         .map_err(Into::into)
 }
 
@@ -287,18 +314,20 @@ pub fn discover_blocking() -> Result<Vec<GoaAccount>> {
 
 /// Resolve the credentials for a GOA-backed account, refreshing the OAuth2
 /// token if that is what the provider uses.
-pub fn credentials_blocking(account: &Account) -> Result<Credentials> {
+pub fn credentials_blocking(account: &Account, purpose: CredentialPurpose) -> Result<Credentials> {
     let path = account
         .goa_path
         .as_deref()
         .ok_or_else(|| anyhow!("account {} is not backed by GNOME Online Accounts", account.id))?;
-    let goa_id = account.id.strip_prefix("goa:").unwrap_or(&account.id).to_string();
 
     runtime::handle().block_on(async move {
-        // Prefer OAuth2; fall back to the stored password for plain IMAP.
+        // Prefer OAuth2; fall back to the stored password for plain IMAP —
+        // trying both rather than branching on the account's advertised
+        // auth type keeps this working even for a provider that exposes
+        // both interfaces.
         match access_token(path).await {
             Ok(token) => Ok(Credentials::OAuth2(token)),
-            Err(oauth_err) => match password(path, &goa_id).await {
+            Err(oauth_err) => match password(path, purpose).await {
                 Ok(pass) => Ok(Credentials::Password(pass)),
                 Err(pass_err) => Err(anyhow!(
                     "could not get credentials from GNOME Online Accounts \

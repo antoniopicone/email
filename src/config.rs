@@ -95,6 +95,143 @@ impl ThemePreference {
     }
 }
 
+/// How HTML messages adapt to the app's light/dark style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageAppearance {
+    /// Force our readable text colour, leave the message's own background.
+    #[default]
+    AdaptText,
+    /// Force the page background to match the app, leave text colours as
+    /// the sender set them.
+    AdaptBackground,
+    /// Render exactly as the sender authored it, ignoring app theme.
+    AcceptSenderFormat,
+}
+
+impl MessageAppearance {
+    pub const ALL: [MessageAppearance; 3] =
+        [Self::AdaptText, Self::AdaptBackground, Self::AcceptSenderFormat];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            MessageAppearance::AdaptText => "Adatta il testo",
+            MessageAppearance::AdaptBackground => "Adatta lo sfondo",
+            MessageAppearance::AcceptSenderFormat => "Mantieni il formato del mittente",
+        }
+    }
+
+    pub fn subtitle(&self) -> &'static str {
+        match self {
+            MessageAppearance::AdaptText => {
+                "Il testo resta leggibile, lo sfondo è quello del messaggio"
+            }
+            MessageAppearance::AdaptBackground => {
+                "Lo sfondo segue il tema, i colori del testo restano quelli del mittente"
+            }
+            MessageAppearance::AcceptSenderFormat => {
+                "Il messaggio viene mostrato esattamente come inviato"
+            }
+        }
+    }
+}
+
+/// How long a sent message waits in the outbox before it actually goes out,
+/// giving the user a window to undo the send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SendDelay {
+    #[default]
+    Off,
+    Seconds5,
+    Seconds10,
+    Seconds30,
+    Minutes1,
+    Minutes2,
+    Minutes5,
+}
+
+impl SendDelay {
+    pub const ALL: [SendDelay; 7] = [
+        Self::Off,
+        Self::Seconds5,
+        Self::Seconds10,
+        Self::Seconds30,
+        Self::Minutes1,
+        Self::Minutes2,
+        Self::Minutes5,
+    ];
+
+    pub fn seconds(&self) -> u32 {
+        match self {
+            SendDelay::Off => 0,
+            SendDelay::Seconds5 => 5,
+            SendDelay::Seconds10 => 10,
+            SendDelay::Seconds30 => 30,
+            SendDelay::Minutes1 => 60,
+            SendDelay::Minutes2 => 120,
+            SendDelay::Minutes5 => 300,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SendDelay::Off => "Disattivato (invio immediato)",
+            SendDelay::Seconds5 => "5 secondi",
+            SendDelay::Seconds10 => "10 secondi",
+            SendDelay::Seconds30 => "30 secondi",
+            SendDelay::Minutes1 => "1 minuto",
+            SendDelay::Minutes2 => "2 minuti",
+            SendDelay::Minutes5 => "5 minuti",
+        }
+    }
+}
+
+/// How far back to keep message bodies cached on disk for offline reading,
+/// per account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OfflineWindow {
+    Nothing,
+    LastWeek,
+    #[default]
+    LastMonth,
+    LastYear,
+    Everything,
+}
+
+impl OfflineWindow {
+    pub const ALL: [OfflineWindow; 5] =
+        [Self::Nothing, Self::LastWeek, Self::LastMonth, Self::LastYear, Self::Everything];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            OfflineWindow::Nothing => "Nessuno",
+            OfflineWindow::LastWeek => "Ultima settimana",
+            OfflineWindow::LastMonth => "Ultimo mese",
+            OfflineWindow::LastYear => "Ultimo anno",
+            OfflineWindow::Everything => "Tutti i messaggi",
+        }
+    }
+
+    /// Age past which a cached body is pruned; `None` means never.
+    pub fn max_age_days(&self) -> Option<i64> {
+        match self {
+            OfflineWindow::Nothing => Some(0),
+            OfflineWindow::LastWeek => Some(7),
+            OfflineWindow::LastMonth => Some(30),
+            OfflineWindow::LastYear => Some(365),
+            OfflineWindow::Everything => None,
+        }
+    }
+
+    /// The point in time before which a cached body should be pruned;
+    /// `None` means nothing is ever pruned.
+    pub fn cutoff(&self) -> Option<chrono::DateTime<chrono::Local>> {
+        self.max_age_days().map(|days| chrono::Local::now() - chrono::Duration::days(days))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -113,6 +250,30 @@ pub struct Config {
     /// Width of the message list pane in pixels, dragged to size by the user.
     #[serde(default = "default_message_list_width")]
     pub message_list_width: i32,
+    /// Whether HTML messages are allowed to load remote images/resources.
+    #[serde(default)]
+    pub load_remote_content: bool,
+    /// How HTML messages adapt to the app's light/dark style.
+    #[serde(default)]
+    pub message_appearance: MessageAppearance,
+    /// How long a sent message sits in the outbox before actually going out.
+    #[serde(default)]
+    pub send_delay: SendDelay,
+    /// Per-account signature, appended to new/reply/forward bodies. Keyed by
+    /// account id.
+    #[serde(default)]
+    pub signatures: std::collections::BTreeMap<String, String>,
+    /// Per-account offline retention window for cached message bodies.
+    #[serde(default)]
+    pub offline_windows: std::collections::BTreeMap<String, OfflineWindow>,
+    /// Account ids whose folder list is currently collapsed in the sidebar.
+    #[serde(default)]
+    pub collapsed_accounts: std::collections::HashSet<String>,
+    /// Custom order of the sidebar's top shortcut rows (unified inbox, each
+    /// account's inbox, flagged, unread), as stable ids set by drag & drop.
+    /// Empty means "use the default order".
+    #[serde(default)]
+    pub sidebar_order: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -164,6 +325,16 @@ impl Config {
         let text = fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    /// The signature configured for one account, if any.
+    pub fn signature(&self, account_id: &str) -> String {
+        self.signatures.get(account_id).cloned().unwrap_or_default()
+    }
+
+    /// The offline retention window configured for one account.
+    pub fn offline_window(&self, account_id: &str) -> OfflineWindow {
+        self.offline_windows.get(account_id).copied().unwrap_or_default()
     }
 
     pub fn save(&self) -> Result<()> {

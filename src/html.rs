@@ -8,14 +8,17 @@ use std::collections::{HashMap, HashSet};
 
 use ammonia::Builder;
 
+use crate::config::MessageAppearance;
+
 /// Sanitise a message's HTML body.
 ///
 /// Remote images are neutralised by moving `src` to `data-remote-src`, so the
 /// UI can offer a "load remote content" action without leaking a read receipt
-/// the moment the message is opened.
+/// the moment the message is opened. [`allow_remote_images`] restores them
+/// once the user (or their preference) allows it.
 pub fn sanitize(html: &str) -> String {
     let mut tags = default_tags();
-    tags.remove("img");
+    tags.insert("img");
 
     let mut builder = Builder::default();
     builder
@@ -23,17 +26,40 @@ pub fn sanitize(html: &str) -> String {
         .rm_tags(["script", "style", "iframe", "object", "embed", "form", "input", "base"])
         .url_relative(ammonia::UrlRelative::Deny)
         .link_rel(Some("noopener noreferrer"))
-        .add_generic_attributes(["style", "align", "valign", "bgcolor", "width", "height"]);
+        .add_generic_attributes(["style", "align", "valign", "bgcolor", "width", "height"])
+        .add_tag_attributes("img", ["src", "alt"]);
 
     let cleaned = builder.clean(html).to_string();
     defer_remote_images(&cleaned)
 }
 
-/// Rewrite `<img src=...>` into a placeholder that does not hit the network.
+/// Rewrite `<img src=...>` into an inert placeholder: the network-facing
+/// `src` becomes `data-remote-src`, so parsing the document can never trigger
+/// a fetch on its own.
 fn defer_remote_images(html: &str) -> String {
-    // The sanitiser already removed <img>; re-insert the ones from the source
-    // as inert placeholders so the layout does not collapse.
-    html.replace("<img ", "<img data-blocked=\"1\" ")
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find("<img ") {
+        out.push_str(&rest[..start]);
+        out.push_str("<img data-blocked=\"1\" ");
+        rest = &rest[start + "<img ".len()..];
+
+        let Some(end) = rest.find('>') else {
+            out.push_str(rest);
+            return out;
+        };
+        let (attrs, after) = rest.split_at(end);
+        out.push_str(&attrs.replacen("src=", "data-remote-src=", 1));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Restore the `src` neutralised by [`sanitize`], so the images actually
+/// load — called at render time once remote content is allowed.
+pub fn allow_remote_images(html: &str) -> String {
+    html.replace("data-blocked=\"1\" data-remote-src=", "src=")
 }
 
 fn default_tags() -> HashSet<&'static str> {
@@ -202,11 +228,24 @@ pub fn escape(text: &str) -> String {
 
 /// Wrap a message body in a document styled to match the current GTK theme, so
 /// the WebView does not flash white inside a dark window.
-pub fn wrap_document(body_html: &str, dark: bool) -> String {
-    let (bg, fg, quote, link, border) = if dark {
+///
+/// `appearance` decides how much of that styling actually reaches the
+/// message: [`MessageAppearance::AdaptText`] forces only the text colour,
+/// [`MessageAppearance::AdaptBackground`] forces only the background, and
+/// [`MessageAppearance::AcceptSenderFormat`] forces neither and always uses
+/// the light palette, leaving the message exactly as the sender authored it.
+pub fn wrap_document(body_html: &str, dark: bool, appearance: MessageAppearance) -> String {
+    let effective_dark = dark && appearance != MessageAppearance::AcceptSenderFormat;
+    let (bg, fg, quote, link, border) = if effective_dark {
         ("#1d1d20", "#f2f2f5", "#9a9aa5", "#7cb7ff", "#3a3a40")
     } else {
         ("#ffffff", "#1c1c1e", "#6b6b70", "#0a68d8", "#e2e2e6")
+    };
+
+    let base_rule = match appearance {
+        MessageAppearance::AdaptText => format!("color: {fg};"),
+        MessageAppearance::AdaptBackground => format!("background: {bg};"),
+        MessageAppearance::AcceptSenderFormat => String::new(),
     };
 
     format!(
@@ -220,8 +259,7 @@ pub fn wrap_document(body_html: &str, dark: bool) -> String {
   html, body {{
     margin: 0;
     padding: 0 22px 28px 22px;
-    background: {bg};
-    color: {fg};
+    {base_rule}
     font-family: 'Cantarell', 'Inter', system-ui, -apple-system, sans-serif;
     font-size: 14.5px;
     line-height: 1.55;
@@ -262,15 +300,15 @@ pub fn wrap_document(body_html: &str, dark: bool) -> String {
 </head>
 <body>{body_html}</body>
 </html>"#,
-        scheme = if dark { "dark" } else { "light" },
+        scheme = if effective_dark { "dark" } else { "light" },
     )
 }
 
 /// Render a plain-text body as an HTML document, linkifying bare URLs.
-pub fn plain_text_document(text: &str, dark: bool) -> String {
+pub fn plain_text_document(text: &str, dark: bool, appearance: MessageAppearance) -> String {
     let escaped = escape(text);
     let linked = linkify(&escaped);
-    wrap_document(&format!("<div class=\"plain\">{linked}</div>"), dark)
+    wrap_document(&format!("<div class=\"plain\">{linked}</div>"), dark, appearance)
 }
 
 /// Turn bare `http(s)://` runs into anchors. Input must already be escaped.
@@ -310,6 +348,18 @@ mod tests {
         assert!(!clean.contains("script"));
         assert!(!clean.contains("onclick"));
         assert!(clean.contains("ciao"));
+    }
+
+    #[test]
+    fn neutralises_and_restores_remote_images() {
+        let dirty = r#"<img src="https://evil.example/pixel.gif" alt="x">"#;
+        let clean = sanitize(dirty);
+        assert!(!clean.contains(" src=\"https://evil.example"), "a live src slipped through: {clean}");
+        assert!(clean.contains("data-remote-src=\"https://evil.example/pixel.gif\""));
+
+        let restored = allow_remote_images(&clean);
+        assert!(restored.contains("src=\"https://evil.example/pixel.gif\""));
+        assert!(!restored.contains("data-remote-src="));
     }
 
     #[test]

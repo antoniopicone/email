@@ -3,9 +3,10 @@
 pub mod accounts;
 pub mod compose;
 pub mod message_view;
+pub mod preferences;
 pub mod rows;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -16,11 +17,12 @@ use gtk::prelude::*;
 use libadwaita as adw;
 use adw::prelude::*;
 
+use crate::backend::smtp::Outgoing;
 use crate::backend::{Backend, Command, ConnectionState, Event};
 use compose::ComposeKind;
 use crate::config::{Config, ThemePreference};
 use crate::model::{Account, Mailaddr, Mailbox, MailboxKind, Message, MessageSummary};
-use message_view::MessageView;
+use message_view::{MessageView, RenderPrefs};
 
 const APP_ID: &str = "it.antoniopicone.MailView";
 
@@ -195,6 +197,90 @@ impl State {
     }
 }
 
+/// The natural (default) order of the sidebar's top shortcut rows: the
+/// unified inbox, one per account, then Flagged and Unread — only shown at
+/// all once there is more than one account to unify.
+fn natural_shortcut_ids(state: &State) -> Vec<String> {
+    if state.accounts.len() <= 1 {
+        return Vec::new();
+    }
+    let mut ids = vec!["unified".to_string()];
+    for account in &state.accounts {
+        ids.push(format!("account:{}", account.id));
+    }
+    ids.push("flagged".to_string());
+    ids.push("unread".to_string());
+    ids
+}
+
+/// The natural order, with the user's saved drag-and-drop order applied:
+/// customised items keep their saved position, anything new (a just-added
+/// account, say) is appended in its natural place.
+fn ordered_shortcut_ids(state: &State, config: &Config) -> Vec<String> {
+    let natural = natural_shortcut_ids(state);
+    if config.sidebar_order.is_empty() {
+        return natural;
+    }
+    let natural_set: std::collections::HashSet<&str> =
+        natural.iter().map(String::as_str).collect();
+    let mut ordered: Vec<String> = config
+        .sidebar_order
+        .iter()
+        .filter(|id| natural_set.contains(id.as_str()))
+        .cloned()
+        .collect();
+    for id in &natural {
+        if !ordered.contains(id) {
+            ordered.push(id.clone());
+        }
+    }
+    ordered
+}
+
+/// Build one shortcut row from its stable id, or `None` when the id no
+/// longer resolves to anything (an account that was removed, or whose
+/// inbox has not been discovered yet).
+fn build_shortcut_row(id: &str, state: &State) -> Option<(gtk::ListBoxRow, SidebarEntry)> {
+    match id {
+        "unified" => Some((
+            rows::smart_row(
+                SmartMailbox::AllInboxes.title(),
+                SmartMailbox::AllInboxes.icon(),
+                state.total_inbox_unread(),
+            ),
+            SidebarEntry { target: FolderTarget::Smart(SmartMailbox::AllInboxes), shortcut: true },
+        )),
+        "flagged" => Some((
+            rows::smart_row(SmartMailbox::Flagged.title(), SmartMailbox::Flagged.icon(), 0),
+            SidebarEntry { target: FolderTarget::Smart(SmartMailbox::Flagged), shortcut: true },
+        )),
+        "unread" => Some((
+            rows::smart_row(
+                SmartMailbox::Unread.title(),
+                SmartMailbox::Unread.icon(),
+                state.total_inbox_unread(),
+            ),
+            SidebarEntry { target: FolderTarget::Smart(SmartMailbox::Unread), shortcut: true },
+        )),
+        _ => {
+            let account_id = id.strip_prefix("account:")?;
+            let account = state.accounts.iter().find(|a| a.id == account_id)?;
+            let path = state.inbox_path(&account.id)?.to_string();
+            Some((
+                rows::smart_row(
+                    &account.short_label(),
+                    MailboxKind::Inbox.icon(),
+                    state.inbox_unread(&account.id),
+                ),
+                SidebarEntry {
+                    target: FolderTarget::Mailbox { account_id: account.id.clone(), path },
+                    shortcut: true,
+                },
+            ))
+        }
+    }
+}
+
 struct Widgets {
     window: adw::ApplicationWindow,
     sidebar_list: gtk::ListBox,
@@ -244,6 +330,10 @@ impl App {
         let mut backend = Backend::new();
         for account in &accounts {
             backend.add_account(account.clone());
+            // Enforce the offline retention window against whatever is
+            // already on disk from a previous run.
+            let cutoff = config.borrow().offline_window(&account.id).cutoff();
+            crate::cache::prune_messages_older_than(&account.id, cutoff);
         }
         let events = backend.events();
         let backend = Rc::new(RefCell::new(backend));
@@ -455,6 +545,10 @@ impl App {
         }
         {
             let app = self.clone();
+            add("preferences", Box::new(move || app.open_preferences()));
+        }
+        {
+            let app = self.clone();
             add("reply", Box::new(move || app.open_compose(ComposeKind::Reply)));
         }
         {
@@ -641,8 +735,8 @@ impl App {
                 if !still_relevant {
                     return;
                 }
-                let dark = self.state.borrow().dark;
-                self.widgets.message_view.show_message(&message, dark);
+                let prefs = self.render_prefs();
+                self.widgets.message_view.show_message(&message, prefs);
                 crate::cache::store_message(
                     &account_id,
                     &message.summary.mailbox,
@@ -739,12 +833,12 @@ impl App {
                 self.clear_activity(&account_id);
 
                 // A message that failed to open belongs in the reading pane;
-                // everything else is an account-level problem for the banner.
+                // everything else is an account-level problem, worth a
+                // dialog the user has to actually acknowledge.
                 if context.starts_with("apertura del messaggio") {
                     self.widgets.message_view.show_error(&context, &detail);
                 } else {
-                    self.widgets.banner.set_title(&format!("{context}: {detail}"));
-                    self.widgets.banner.set_revealed(true);
+                    self.show_error_dialog(&context, &detail);
                 }
             }
         }
@@ -773,77 +867,50 @@ impl App {
         };
 
         // ---- unified section ------------------------------------------
-        // Only worth showing once there is more than one account to unify.
-        let unified = state.accounts.len() > 1;
-        if unified {
-            // No section header here: the pane is already titled "Caselle",
-            // and iOS leaves this first group unlabelled too.
-            let total_unread = state.total_inbox_unread();
-            push(
-                rows::smart_row(
-                    SmartMailbox::AllInboxes.title(),
-                    SmartMailbox::AllInboxes.icon(),
-                    total_unread,
-                ),
-                Some(SidebarEntry {
-                    target: FolderTarget::Smart(SmartMailbox::AllInboxes),
-                    shortcut: true,
-                }),
-            );
-
-            // One shortcut per account inbox.
-            for account in &state.accounts {
-                let Some(path) = state.inbox_path(&account.id) else { continue };
-                push(
-                    rows::smart_row(
-                        &account.short_label(),
-                        MailboxKind::Inbox.icon(),
-                        state.inbox_unread(&account.id),
-                    ),
-                    Some(SidebarEntry {
-                        target: FolderTarget::Mailbox {
-                            account_id: account.id.clone(),
-                            path: path.to_string(),
-                        },
-                        shortcut: true,
-                    }),
-                );
-            }
-
-            for smart in [SmartMailbox::Flagged, SmartMailbox::Unread] {
-                let badge = match smart {
-                    SmartMailbox::Unread => total_unread,
-                    _ => 0,
-                };
-                push(
-                    rows::smart_row(smart.title(), smart.icon(), badge),
-                    Some(SidebarEntry { target: FolderTarget::Smart(smart), shortcut: true }),
-                );
+        // No section header here: the pane is already titled "Caselle", and
+        // iOS leaves this first group unlabelled too. Only worth showing
+        // once there is more than one account to unify — `ordered_shortcut_ids`
+        // already returns nothing otherwise.
+        let ids = ordered_shortcut_ids(&state, &self.config.borrow());
+        for id in &ids {
+            if let Some((row, entry)) = build_shortcut_row(id, &state) {
+                self.attach_shortcut_dnd(&row, id);
+                push(row, Some(entry));
             }
         }
 
         // ---- one section per account ----------------------------------
         for account in &state.accounts {
-            let status = state
+            let has_error = state
                 .status
                 .get(&account.id)
-                .map(|(_, detail)| detail.clone())
-                .unwrap_or_else(|| "In attesa…".to_string());
+                .map(|(state, _)| *state == ConnectionState::Offline)
+                .unwrap_or(false);
 
-            push(rows::section_header(&account.short_label(), &status), None);
+            let collapsed = self.config.borrow().collapsed_accounts.contains(&account.id);
+            let app = self.clone();
+            let account_id = account.id.clone();
+            push(
+                rows::section_header(&account.short_label(), has_error, collapsed, move || {
+                    app.toggle_account_collapsed(&account_id);
+                }),
+                None,
+            );
 
-            if let Some(mailboxes) = state.mailboxes.get(&account.id) {
-                for mailbox in mailboxes {
-                    push(
-                        rows::mailbox_row(mailbox),
-                        Some(SidebarEntry {
-                            target: FolderTarget::Mailbox {
-                                account_id: mailbox.account_id.clone(),
-                                path: mailbox.path.clone(),
-                            },
-                            shortcut: false,
-                        }),
-                    );
+            if !collapsed {
+                if let Some(mailboxes) = state.mailboxes.get(&account.id) {
+                    for mailbox in mailboxes {
+                        push(
+                            rows::mailbox_row(mailbox),
+                            Some(SidebarEntry {
+                                target: FolderTarget::Mailbox {
+                                    account_id: mailbox.account_id.clone(),
+                                    path: mailbox.path.clone(),
+                                },
+                                shortcut: false,
+                            }),
+                        );
+                    }
                 }
             }
         }
@@ -874,6 +941,111 @@ impl App {
         }
 
         crate::badge::set_unread_count(self.state.borrow().total_inbox_unread());
+    }
+
+    /// Fold or unfold one account's folder list.
+    fn toggle_account_collapsed(self: &Rc<Self>, account_id: &str) {
+        let mut config = self.config.borrow_mut();
+        if !config.collapsed_accounts.remove(account_id) {
+            config.collapsed_accounts.insert(account_id.to_string());
+        }
+        if let Err(e) = config.save() {
+            log::warn!("could not save the sidebar collapse state: {e:#}");
+        }
+        drop(config);
+        self.rebuild_sidebar();
+    }
+
+    /// Wire a shortcut row so it can be dragged, and can accept another
+    /// shortcut dropped onto it to reorder the two. While a drag hovers, a
+    /// line lights up at the row's near or far edge — the gap it would land
+    /// in — rather than silently accepting a drop with no feedback.
+    fn attach_shortcut_dnd(self: &Rc<Self>, row: &gtk::ListBoxRow, id: &str) {
+        let drag_source = gtk::DragSource::new();
+        drag_source.set_actions(gtk::gdk::DragAction::MOVE);
+        let drag_id = id.to_string();
+        drag_source.connect_prepare(move |_, _, _| {
+            Some(gtk::gdk::ContentProvider::for_value(&drag_id.to_value()))
+        });
+        row.add_controller(drag_source);
+
+        let drop_target =
+            gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::MOVE);
+        drop_target.set_actions(gtk::gdk::DragAction::MOVE);
+
+        {
+            let app = self.clone();
+            let row_weak = row.downgrade();
+            drop_target.connect_motion(move |_, _x, y| {
+                if let Some(row) = row_weak.upgrade() {
+                    let after = y > row.height() as f64 / 2.0;
+                    app.set_drop_indicator(&row, after);
+                }
+                gtk::gdk::DragAction::MOVE
+            });
+        }
+        {
+            let app = self.clone();
+            drop_target.connect_leave(move |_| app.clear_drop_indicators());
+        }
+        {
+            let app = self.clone();
+            let target_id = id.to_string();
+            let row_weak = row.downgrade();
+            drop_target.connect_drop(move |_, value, _x, y| {
+                app.clear_drop_indicators();
+                let Ok(dragged_id) = value.get::<String>() else { return false };
+                let Some(target_row) = row_weak.upgrade() else { return false };
+                let after = y > target_row.height() as f64 / 2.0;
+                app.move_shortcut(&dragged_id, &target_id, after);
+                true
+            });
+        }
+        row.add_controller(drop_target);
+    }
+
+    /// Light up the reorder line at one row's near or far edge, clearing it
+    /// from every other row first — only one drop zone is active at a time.
+    fn set_drop_indicator(self: &Rc<Self>, row: &gtk::ListBoxRow, after: bool) {
+        self.clear_drop_indicators();
+        row.add_css_class(if after { "drop-indicator-after" } else { "drop-indicator-before" });
+    }
+
+    fn clear_drop_indicators(self: &Rc<Self>) {
+        let mut child = self.widgets.sidebar_list.first_child();
+        while let Some(widget) = child {
+            widget.remove_css_class("drop-indicator-before");
+            widget.remove_css_class("drop-indicator-after");
+            child = widget.next_sibling();
+        }
+    }
+
+    /// Move a shortcut row to just before or after another, and persist the
+    /// resulting order.
+    fn move_shortcut(self: &Rc<Self>, dragged_id: &str, target_id: &str, after: bool) {
+        if dragged_id == target_id {
+            return;
+        }
+        let mut order = {
+            let state = self.state.borrow();
+            let config = self.config.borrow();
+            ordered_shortcut_ids(&state, &config)
+        };
+        let Some(from) = order.iter().position(|id| id == dragged_id) else { return };
+        let item = order.remove(from);
+        let Some(mut to) = order.iter().position(|id| id == target_id) else { return };
+        if after {
+            to += 1;
+        }
+        order.insert(to.min(order.len()), item);
+
+        let mut config = self.config.borrow_mut();
+        config.sidebar_order = order;
+        if let Err(e) = config.save() {
+            log::warn!("could not save the sidebar order: {e:#}");
+        }
+        drop(config);
+        self.rebuild_sidebar();
     }
 
     /// Open on an inbox rather than on an empty pane.
@@ -1300,8 +1472,8 @@ impl App {
         // server: show the cached copy straight away.
         match crate::cache::load_message(&account_id, &mailbox, uid) {
             Some(cached) => {
-                let dark = self.state.borrow().dark;
-                self.widgets.message_view.show_message(&cached, dark);
+                let prefs = self.render_prefs();
+                self.widgets.message_view.show_message(&cached, prefs);
                 self.state.borrow_mut().current_message = Some(cached);
                 self.set_actions_enabled(true);
             }
@@ -1340,9 +1512,21 @@ impl App {
     }
 
     fn rerender_body(self: &Rc<Self>) {
+        let prefs = self.render_prefs();
         let state = self.state.borrow();
         if let Some(message) = &state.current_message {
-            self.widgets.message_view.render_body(message, state.dark);
+            self.widgets.message_view.render_body(message, prefs);
+        }
+    }
+
+    /// The current display preferences that affect how a message body is
+    /// rendered.
+    fn render_prefs(self: &Rc<Self>) -> RenderPrefs {
+        let config = self.config.borrow();
+        RenderPrefs {
+            dark: self.state.borrow().dark,
+            appearance: config.message_appearance,
+            load_remote_content: config.load_remote_content,
         }
     }
 
@@ -1473,10 +1657,7 @@ impl App {
             // The password goes to the keyring, never to the config file.
             let label = format!("MailView — {}", manual.email);
             if let Err(e) = crate::secrets::store_password_blocking(&manual.id, &label, &password) {
-                app.widgets
-                    .banner
-                    .set_title(&format!("Impossibile salvare la password nel portachiavi: {e:#}"));
-                app.widgets.banner.set_revealed(true);
+                app.show_error_dialog("Impossibile salvare la password", &format!("{e:#}"));
                 return;
             }
 
@@ -1499,6 +1680,14 @@ impl App {
         });
     }
 
+    fn open_preferences(self: &Rc<Self>) {
+        let accounts = self.state.borrow().accounts.clone();
+        let app = self.clone();
+        preferences::open(&self.widgets.window, self.config.clone(), accounts, move || {
+            app.rerender_body();
+        });
+    }
+
     fn open_compose(self: &Rc<Self>, kind: ComposeKind) {
         let Some(account) = self.active_account() else {
             self.toast("Nessun account configurato");
@@ -1513,23 +1702,58 @@ impl App {
             self.toast("Apri prima un messaggio");
             return;
         }
-        let prefilled = compose::prefill(kind, &account, message);
+        let signature = self.config.borrow().signature(&account.id);
+        let prefilled = compose::prefill(kind, &account, message, &signature);
         drop(state);
 
         let app = self.clone();
-        let account_id = account.id.clone();
+        let accounts = self.state.borrow().accounts.clone();
         let known_contacts = self.known_contacts();
         compose::open(
             &self.widgets.window,
             kind,
+            &accounts,
             &account,
             prefilled,
             known_contacts,
-            move |outgoing| {
-                app.toast("Invio in corso…");
-                app.backend.borrow().send(&account_id, Command::Send { outgoing });
-            },
+            move |sender, outgoing| app.send_with_undo(sender, outgoing),
         );
+    }
+
+    /// Send a message, honouring the configured send delay: with a delay
+    /// set, the message sits in an undo window (a toast with an "Annulla"
+    /// button) before it actually goes out.
+    fn send_with_undo(self: &Rc<Self>, sender: Account, outgoing: Outgoing) {
+        let delay = self.config.borrow().send_delay;
+        let seconds = delay.seconds();
+        if seconds == 0 {
+            self.toast("Invio in corso…");
+            self.backend.borrow().send(&sender.id, Command::Send { outgoing });
+            return;
+        }
+
+        let cancelled = Rc::new(Cell::new(false));
+
+        let toast = adw::Toast::new(&format!("Invio tra {}…", delay.label().to_lowercase()));
+        toast.set_button_label(Some("Annulla"));
+        toast.set_priority(adw::ToastPriority::High);
+        toast.set_timeout(seconds);
+        {
+            let cancelled = cancelled.clone();
+            toast.connect_button_clicked(move |_| cancelled.set(true));
+        }
+        self.widgets.toast_overlay.add_toast(toast);
+
+        let app = self.clone();
+        let mut outgoing = Some(outgoing);
+        glib::timeout_add_seconds_local(seconds, move || {
+            if !cancelled.get() {
+                if let Some(outgoing) = outgoing.take() {
+                    app.backend.borrow().send(&sender.id, Command::Send { outgoing });
+                }
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     /// Addresses already seen among the currently loaded messages, deduped
@@ -1560,6 +1784,17 @@ impl App {
 
     fn toast(&self, text: &str) {
         self.widgets.toast_overlay.add_toast(adw::Toast::new(text));
+    }
+
+    /// Report a failure the user needs to actually notice and dismiss —
+    /// a connection or credentials problem, say — as a modal dialog rather
+    /// than the easy-to-miss banner or an auto-dismissing toast.
+    fn show_error_dialog(&self, context: &str, detail: &str) {
+        let dialog = adw::AlertDialog::new(Some(context), Some(detail));
+        dialog.add_response("ok", "Chiudi");
+        dialog.set_default_response(Some("ok"));
+        dialog.set_close_response("ok");
+        dialog.present(Some(&self.widgets.window));
     }
 
     // --------------------------------------------------------- status bar
@@ -1684,6 +1919,10 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
     tools.append(Some("Cerca"), Some("win.search"));
     menu.append_section(None, &tools);
 
+    let prefs = gio::Menu::new();
+    prefs.append(Some("Preferenze…"), Some("win.preferences"));
+    menu.append_section(None, &prefs);
+
     let menu_button = gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .menu_model(&menu)
@@ -1753,7 +1992,7 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
         .build();
 
     let compose_button = gtk::Button::builder()
-        .icon_name("document-edit-symbolic")
+        .icon_name("mailview-compose-symbolic")
         .tooltip_text("Nuovo messaggio (Ctrl+N)")
         .action_name("win.compose")
         .build();
@@ -1797,17 +2036,17 @@ fn build_widgets(application: &adw::Application, config: &Config) -> Widgets {
     let message_view = MessageView::new();
 
     let reply_button = gtk::Button::builder()
-        .icon_name("mail-reply-sender-symbolic")
+        .icon_name("mailview-reply-symbolic")
         .tooltip_text("Rispondi (Ctrl+Invio)")
         .action_name("win.reply")
         .build();
     let reply_all_button = gtk::Button::builder()
-        .icon_name("mail-reply-all-symbolic")
+        .icon_name("mailview-reply-all-symbolic")
         .tooltip_text("Rispondi a tutti (Ctrl+Maiusc+Invio)")
         .action_name("win.reply-all")
         .build();
     let forward_button = gtk::Button::builder()
-        .icon_name("mail-forward-symbolic")
+        .icon_name("mailview-forward-symbolic")
         .tooltip_text("Inoltra")
         .action_name("win.forward")
         .build();

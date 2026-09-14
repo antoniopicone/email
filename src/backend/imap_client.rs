@@ -150,7 +150,6 @@ impl ImapClient {
                 .collect();
 
             let kind = MailboxKind::classify(&path, &cleaned);
-            let depth = path.matches(delimiter).count();
             let leaf = path.rsplit(delimiter).next().unwrap_or(&path).to_string();
 
             let (unread, total) = self.folder_counts(&path);
@@ -162,7 +161,6 @@ impl ImapClient {
                 kind,
                 unread,
                 total,
-                depth,
             });
         }
 
@@ -596,11 +594,16 @@ fn bodystructure_has_attachment(body: &imap_proto::BodyStructure) -> bool {
     }
 }
 
-/// Resolve credentials for an account, from GOA or the keyring.
-pub fn resolve_credentials(account: &Account) -> Result<Credentials> {
+/// Resolve credentials for an account, from GOA or the keyring. `purpose`
+/// only matters for GOA `PasswordBased` accounts, which can keep separate
+/// secrets for IMAP and SMTP.
+pub fn resolve_credentials(
+    account: &Account,
+    purpose: crate::goa::CredentialPurpose,
+) -> Result<Credentials> {
     use crate::model::AccountSource;
     match account.source {
-        AccountSource::Gnome => crate::goa::credentials_blocking(account),
+        AccountSource::Gnome => crate::goa::credentials_blocking(account, purpose),
         AccountSource::Manual => {
             let password = crate::secrets::lookup_password_blocking(&account.id)
                 .context("reading the password from the keyring")?

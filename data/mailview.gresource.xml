@@ -18,6 +18,10 @@
     <file alias="mailview-folder-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-folder-symbolic.svg</file>
     <file alias="mailview-flagged-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-flagged-symbolic.svg</file>
     <file alias="mailview-unread-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-unread-symbolic.svg</file>
+    <file alias="mailview-compose-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-compose-symbolic.svg</file>
+    <file alias="mailview-reply-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-reply-symbolic.svg</file>
+    <file alias="mailview-reply-all-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-reply-all-symbolic.svg</file>
+    <file alias="mailview-forward-symbolic.svg" preprocess="xml-stripblanks">scalable/actions/mailview-forward-symbolic.svg</file>
   </gresource>
   <gresource prefix="/it/antoniopicone/MailView/icons/scalable/apps">
     <file alias="it.antoniopicone.MailView.svg" preprocess="xml-stripblanks">hicolor/scalable/apps/it.antoniopicone.MailView.svg</file>

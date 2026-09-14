@@ -1,13 +1,22 @@
 //! The reading pane: message header plus a sandboxed WebView for the body.
 
 use gtk4 as gtk;
-use gtk::prelude::*;
+// use gtk::prelude::*;
 use libadwaita as adw;
 use webkit6::prelude::*;
 
+use crate::config::MessageAppearance;
 use crate::html;
 use crate::model::Message;
 use crate::ui::rows;
+
+/// The subset of preferences that affect how a message body is rendered.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderPrefs {
+    pub dark: bool,
+    pub appearance: MessageAppearance,
+    pub load_remote_content: bool,
+}
 
 pub struct MessageView {
     pub root: gtk::Box,
@@ -163,7 +172,7 @@ impl MessageView {
     }
 
     /// Show a fully loaded message.
-    pub fn show_message(&self, message: &Message, dark: bool) {
+    pub fn show_message(&self, message: &Message, prefs: RenderPrefs) {
         let summary = &message.summary;
 
         self.subject.set_text(summary.subject_or_placeholder());
@@ -220,18 +229,27 @@ impl MessageView {
             self.attachments.set_visible(true);
         }
 
-        self.render_body(message, dark);
+        self.render_body(message, prefs);
         self.stack.set_visible_child_name("message");
     }
 
-    /// Re-render the body, e.g. after the system switched to dark mode.
-    pub fn render_body(&self, message: &Message, dark: bool) {
+    /// Re-render the body, e.g. after the system switched to dark mode or a
+    /// display preference changed.
+    pub fn render_body(&self, message: &Message, prefs: RenderPrefs) {
         let document = match &message.html {
-            Some(body) if !body.trim().is_empty() => html::wrap_document(body, dark),
-            _ => html::plain_text_document(&message.text, dark),
+            Some(body) if !body.trim().is_empty() => {
+                let body = if prefs.load_remote_content {
+                    html::allow_remote_images(body)
+                } else {
+                    body.clone()
+                };
+                html::wrap_document(&body, prefs.dark, prefs.appearance)
+            }
+            _ => html::plain_text_document(&message.text, prefs.dark, prefs.appearance),
         };
 
-        self.webview.set_background_color(&background_rgba(dark));
+        let effective_dark = prefs.dark && prefs.appearance != MessageAppearance::AcceptSenderFormat;
+        self.webview.set_background_color(&background_rgba(effective_dark));
         self.webview.load_html(&document, None);
     }
 

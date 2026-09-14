@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, TimeZone};
+use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Attachment, Mailaddr, Mailbox, Message, MessageSummary};
@@ -123,6 +123,26 @@ struct CachedMessage {
     html: Option<String>,
     text: String,
     attachments: Vec<CachedAttachment>,
+}
+
+/// Bumped whenever a change to how `html` is sanitised makes an
+/// already-cached body stale in a way a plain struct change wouldn't catch.
+/// A record written under an older schema is treated as a cache miss, so it
+/// gets re-fetched (and re-sanitised) from the server instead of being served
+/// stuck in its old shape forever.
+///
+/// 1: `<img>` used to be dropped entirely by the sanitiser instead of being
+/// neutralised into a `data-remote-src` placeholder, so a body cached before
+/// this version has no image markup left to restore — the "load remote
+/// content" preference can never do anything for it.
+const MESSAGE_SCHEMA: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct StoredMessage {
+    #[serde(default)]
+    schema: u32,
+    #[serde(flatten)]
+    message: CachedMessage,
 }
 
 impl From<&Message> for CachedMessage {
@@ -260,12 +280,87 @@ pub fn store_summaries(account_id: &str, mailbox: &str, summaries: &[MessageSumm
 /// A previously opened message, if it is still on disk.
 pub fn load_message(account_id: &str, mailbox: &str, uid: u32) -> Option<Message> {
     let bytes = fs::read(message_path(account_id, mailbox, uid)).ok()?;
-    let cached: CachedMessage = serde_json::from_slice(&bytes).ok()?;
-    Some(cached.into())
+    let stored: StoredMessage = serde_json::from_slice(&bytes).ok()?;
+    if stored.schema != MESSAGE_SCHEMA {
+        return None;
+    }
+    Some(stored.message.into())
 }
 
 /// Save a fully fetched message so opening it again needs no network trip.
 pub fn store_message(account_id: &str, mailbox: &str, uid: u32, message: &Message) {
-    let cached: CachedMessage = message.into();
-    spawn_write(message_path(account_id, mailbox, uid), cached);
+    let stored = StoredMessage { schema: MESSAGE_SCHEMA, message: message.into() };
+    spawn_write(message_path(account_id, mailbox, uid), stored);
+}
+
+/// Where the cache lives on disk, for display in Preferences.
+pub fn location() -> PathBuf {
+    root()
+}
+
+/// Total bytes the cache currently occupies on disk.
+pub fn disk_usage() -> u64 {
+    fn walk(dir: &Path) -> u64 {
+        let Ok(entries) = fs::read_dir(dir) else { return 0 };
+        entries
+            .flatten()
+            .map(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path)
+                } else {
+                    entry.metadata().map(|m| m.len()).unwrap_or(0)
+                }
+            })
+            .sum()
+    }
+    walk(&root())
+}
+
+/// Delete the entire on-disk cache for every account.
+pub fn clear_all() -> std::io::Result<()> {
+    let root = root();
+    if root.exists() {
+        fs::remove_dir_all(&root)?;
+    }
+    Ok(())
+}
+
+/// Drop cached message bodies older than `cutoff` for one account, freeing
+/// disk space once the user tightens their offline retention window.
+/// Summaries and the folder list are left alone — only the (larger) bodies
+/// are pruned, and a body already open in the reading pane simply gets
+/// re-fetched on next use. `cutoff: None` means "keep everything".
+pub fn prune_messages_older_than(account_id: &str, cutoff: Option<DateTime<Local>>) {
+    let Some(cutoff) = cutoff else { return };
+    let account_id = account_id.to_string();
+    std::thread::spawn(move || {
+        let Ok(mailboxes) = fs::read_dir(account_dir(&account_id)) else { return };
+        for mailbox in mailboxes.flatten() {
+            let path = mailbox.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Ok(files) = fs::read_dir(&path) else { continue };
+            for file in files.flatten() {
+                let file_path = file.path();
+                let is_message = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("msg-") && n.ends_with(".json"));
+                if !is_message {
+                    continue;
+                }
+                let Ok(bytes) = fs::read(&file_path) else { continue };
+                let Ok(cached) = serde_json::from_slice::<CachedMessage>(&bytes) else { continue };
+                let older = Local
+                    .timestamp_opt(cached.summary.date, 0)
+                    .single()
+                    .is_some_and(|date| date < cutoff);
+                if older {
+                    let _ = fs::remove_file(&file_path);
+                }
+            }
+        }
+    });
 }
