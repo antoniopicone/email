@@ -1,7 +1,9 @@
 //! Core mail types shared between the backend workers and the UI.
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Datelike, Local};
 use serde::{Deserialize, Serialize};
+
+use crate::i18n::t;
 
 /// How an account proves who it is to the IMAP server.
 #[derive(Debug, Clone)]
@@ -212,7 +214,7 @@ impl MessageSummary {
         if age.num_days() == 0 && now.date_naive() == self.date.date_naive() {
             self.date.format("%H:%M").to_string()
         } else if age.num_days() < 7 && age.num_days() >= 0 {
-            self.date.format("%a").to_string()
+            crate::i18n::weekday_abbr(self.date.weekday()).to_string()
         } else if self.date.format("%Y").to_string() == now.format("%Y").to_string() {
             self.date.format("%d/%m").to_string()
         } else {
@@ -222,7 +224,7 @@ impl MessageSummary {
 
     pub fn subject_or_placeholder(&self) -> &str {
         if self.subject.trim().is_empty() {
-            "(nessun oggetto)"
+            t("(nessun oggetto)")
         } else {
             &self.subject
         }

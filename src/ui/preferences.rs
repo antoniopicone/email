@@ -10,6 +10,7 @@ use libadwaita as adw;
 use adw::prelude::*;
 
 use crate::config::{Config, MessageAppearance, OfflineWindow, SendDelay};
+use crate::i18n::t;
 use crate::model::Account;
 
 fn save(config: &Config) {
@@ -33,31 +34,31 @@ pub fn open(
     stack.add_titled_with_icon(
         &build_display_page(&config, &on_display_change),
         Some("display"),
-        "Display",
+        t("Display"),
         "mail-unread-symbolic",
     );
     stack.add_titled_with_icon(
         &build_outgoing_page(&config, &accounts),
         Some("outgoing"),
-        "In uscita",
+        t("In uscita"),
         "mailview-sent-symbolic",
     );
     stack.add_titled_with_icon(
         &build_offline_page(&config, &accounts),
         Some("offline"),
-        "Offline",
+        t("Offline"),
         "network-offline-symbolic",
     );
     stack.add_titled_with_icon(
         &build_local_mail_page(),
         Some("local"),
-        "Posta locale",
+        t("Posta locale"),
         "drive-harddisk-symbolic",
     );
     stack.add_titled_with_icon(
         &build_about_page(),
         Some("about"),
-        "Informazioni",
+        t("Informazioni"),
         "help-about-symbolic",
     );
 
@@ -76,7 +77,7 @@ pub fn open(
     let window = adw::Window::builder()
         .transient_for(parent)
         .modal(false)
-        .title("Preferenze")
+        .title(t("Preferenze"))
         .default_width(720)
         .default_height(560)
         .build();
@@ -91,8 +92,8 @@ fn build_display_page(config: &Rc<RefCell<Config>>, on_change: &Rc<dyn Fn()>) ->
     let group = adw::PreferencesGroup::new();
 
     let remote_row = adw::SwitchRow::builder()
-        .title("Carica contenuti remoti")
-        .subtitle("Mostra immagini remote e risorse collegate nei messaggi HTML")
+        .title(t("Carica contenuti remoti"))
+        .subtitle(t("Mostra immagini remote e risorse collegate nei messaggi HTML"))
         .active(config.borrow().load_remote_content)
         .build();
     {
@@ -109,7 +110,7 @@ fn build_display_page(config: &Rc<RefCell<Config>>, on_change: &Rc<dyn Fn()>) ->
     }
     group.add(&remote_row);
 
-    let appearance_row = adw::ComboRow::builder().title("Aspetto dei messaggi").build();
+    let appearance_row = adw::ComboRow::builder().title(t("Aspetto dei messaggi")).build();
     let appearance_labels: [&str; 3] = MessageAppearance::ALL.map(|a| a.label());
     appearance_row.set_model(Some(&gtk::StringList::new(&appearance_labels)));
     let current_appearance = config.borrow().message_appearance;
@@ -145,9 +146,9 @@ fn build_outgoing_page(config: &Rc<RefCell<Config>>, accounts: &[Account]) -> ad
 
     // ---- signatures ----------------------------------------------------
     let sig_group = adw::PreferencesGroup::new();
-    sig_group.set_title("Firme");
+    sig_group.set_title(t("Firme"));
 
-    let account_row = adw::ComboRow::builder().title("Account").build();
+    let account_row = adw::ComboRow::builder().title(t("Account")).build();
     let account_labels: Vec<&str> = accounts.iter().map(|a| a.email.as_str()).collect();
     account_row.set_model(Some(&gtk::StringList::new(&account_labels)));
     sig_group.add(&account_row);
@@ -197,11 +198,11 @@ fn build_outgoing_page(config: &Rc<RefCell<Config>>, accounts: &[Account]) -> ad
 
     // ---- sending ---------------------------------------------------------
     let sending_group = adw::PreferencesGroup::new();
-    sending_group.set_title("Invio");
+    sending_group.set_title(t("Invio"));
 
     let delay_row = adw::ComboRow::builder()
-        .title("Ritardo invio")
-        .subtitle("Trattieni i messaggi in Posta in uscita prima dell'invio, così puoi annullarlo")
+        .title(t("Ritardo invio"))
+        .subtitle(t("Trattieni i messaggi in Posta in uscita prima dell'invio, così puoi annullarlo"))
         .build();
     let delay_labels: [&str; 7] = SendDelay::ALL.map(|d| d.label());
     delay_row.set_model(Some(&gtk::StringList::new(&delay_labels)));
@@ -228,9 +229,9 @@ fn build_outgoing_page(config: &Rc<RefCell<Config>>, accounts: &[Account]) -> ad
 fn build_offline_page(config: &Rc<RefCell<Config>>, accounts: &[Account]) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
     let group = adw::PreferencesGroup::new();
-    group.set_title("Scarica i corpi dei messaggi");
+    group.set_title(t("Scarica i corpi dei messaggi"));
     group.set_description(Some(
-        "Per quanto tempo indietro tenere i messaggi già letti disponibili offline, per ogni account.",
+        t("Per quanto tempo indietro tenere i messaggi già letti disponibili offline, per ogni account."),
     ));
 
     for account in accounts {
@@ -256,7 +257,7 @@ fn build_offline_page(config: &Rc<RefCell<Config>>, accounts: &[Account]) -> adw
     }
 
     if accounts.is_empty() {
-        group.set_description(Some("Nessun account configurato."));
+        group.set_description(Some(t("Nessun account configurato.")));
     }
 
     page.add(&group);
@@ -268,13 +269,13 @@ fn build_offline_page(config: &Rc<RefCell<Config>>, accounts: &[Account]) -> adw
 fn build_local_mail_page() -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
     let group = adw::PreferencesGroup::new();
-    group.set_title("Cache locale");
+    group.set_title(t("Cache locale"));
     group.set_description(Some(
-        "MailView tiene una copia locale di cartelle e messaggi per aprirli all'istante e leggerli offline.",
+        t("MailView tiene una copia locale di cartelle e messaggi per aprirli all'istante e leggerli offline."),
     ));
 
     let location_row = adw::ActionRow::builder()
-        .title("Posizione")
+        .title(t("Posizione"))
         .subtitle(crate::cache::location().display().to_string())
         .build();
     group.add(&location_row);
@@ -282,18 +283,18 @@ fn build_local_mail_page() -> adw::PreferencesPage {
     let size_label = gtk::Label::new(Some(&human_size(crate::cache::disk_usage())));
     size_label.add_css_class("dim-label");
     size_label.set_valign(gtk::Align::Center);
-    let size_row = adw::ActionRow::builder().title("Spazio occupato").build();
+    let size_row = adw::ActionRow::builder().title(t("Spazio occupato")).build();
     size_row.add_suffix(&size_label);
     group.add(&size_row);
 
     let clear_button = gtk::Button::builder()
-        .label("Svuota")
+        .label(t("Svuota"))
         .valign(gtk::Align::Center)
         .css_classes(["destructive-action"])
         .build();
     let clear_row = adw::ActionRow::builder()
-        .title("Elimina tutti i dati scaricati")
-        .subtitle("Cartelle e messaggi verranno riscaricati al bisogno")
+        .title(t("Elimina tutti i dati scaricati"))
+        .subtitle(t("Cartelle e messaggi verranno riscaricati al bisogno"))
         .build();
     clear_row.add_suffix(&clear_button);
     clear_row.set_activatable_widget(Some(&clear_button));
@@ -334,7 +335,8 @@ fn build_about_page() -> adw::StatusPage {
         .icon_name("it.antoniopicone.MailView")
         .title("MailView")
         .description(format!(
-            "Versione {}\n{}",
+            "{} {}\n{}",
+            t("Versione"),
             env!("CARGO_PKG_VERSION"),
             env!("CARGO_PKG_DESCRIPTION")
         ))

@@ -1,5 +1,6 @@
 //! The reading pane: message header plus a sandboxed WebView for the body.
 
+use chrono::Datelike;
 use gtk4 as gtk;
 // use gtk::prelude::*;
 use libadwaita as adw;
@@ -7,6 +8,7 @@ use webkit6::prelude::*;
 
 use crate::config::MessageAppearance;
 use crate::html;
+use crate::i18n::{month_abbr, plural, t, t1};
 use crate::model::Message;
 use crate::ui::rows;
 
@@ -135,8 +137,8 @@ impl MessageView {
         // ---- empty state -------------------------------------------------
         let placeholder = adw::StatusPage::builder()
             .icon_name("mail-unread-symbolic")
-            .title("Nessun messaggio selezionato")
-            .description("Scegli una conversazione dall'elenco per leggerla qui.")
+            .title(t("Nessun messaggio selezionato"))
+            .description(t("Scegli una conversazione dall'elenco per leggerla qui."))
             .build();
         placeholder.set_vexpand(true);
 
@@ -183,9 +185,9 @@ impl MessageView {
         if !summary.to.is_empty() {
             let names: Vec<String> =
                 summary.to.iter().take(3).map(|a| a.label().to_string()).collect();
-            meta.push_str(&format!("A: {}", names.join(", ")));
+            meta.push_str(&t1("A: {}", &names.join(", ")));
             if summary.to.len() > 3 {
-                meta.push_str(&format!(" e altri {}", summary.to.len() - 3));
+                meta.push_str(&t1(" e altri {}", &(summary.to.len() - 3).to_string()));
             }
         }
         if !message.cc.is_empty() {
@@ -199,7 +201,12 @@ impl MessageView {
         self.recipients.set_text(&meta);
         self.recipients.set_visible(!meta.is_empty());
 
-        self.date.set_text(&summary.date.format("%d %b %Y, %H:%M").to_string());
+        self.date.set_text(&format!(
+            "{} {} {}",
+            summary.date.format("%d"),
+            month_abbr(summary.date.month()),
+            summary.date.format("%Y, %H:%M"),
+        ));
 
         // Attachments.
         while let Some(child) = self.attachments.first_child() {
@@ -208,10 +215,10 @@ impl MessageView {
         if message.attachments.is_empty() {
             self.attachments.set_visible(false);
         } else {
+            let count = message.attachments.len();
             let label = gtk::Label::new(Some(&format!(
-                "{} allegat{}",
-                message.attachments.len(),
-                if message.attachments.len() == 1 { "o" } else { "i" }
+                "{count} {}",
+                plural(count, "allegato", "allegati", "attachment", "attachments")
             )));
             label.add_css_class("dim-label");
             self.attachments.append(&label);
@@ -256,7 +263,7 @@ impl MessageView {
     /// Show a message that is still being fetched.
     pub fn show_loading(&self, subject: &str) {
         self.placeholder.set_icon_name(Some("content-loading-symbolic"));
-        self.placeholder.set_title("Caricamento…");
+        self.placeholder.set_title(t("Caricamento…"));
         self.placeholder.set_description(Some(subject));
         self.stack.set_visible_child_name("empty");
     }
@@ -264,16 +271,16 @@ impl MessageView {
     /// Back to the neutral empty state.
     pub fn show_empty(&self) {
         self.placeholder.set_icon_name(Some("mail-unread-symbolic"));
-        self.placeholder.set_title("Nessun messaggio selezionato");
+        self.placeholder.set_title(t("Nessun messaggio selezionato"));
         self.placeholder
-            .set_description(Some("Scegli una conversazione dall'elenco per leggerla qui."));
+            .set_description(Some(t("Scegli una conversazione dall'elenco per leggerla qui.")));
         self.stack.set_visible_child_name("empty");
     }
 
     /// Report a failure in place of the message.
     pub fn show_error(&self, context: &str, detail: &str) {
         self.placeholder.set_icon_name(Some("dialog-warning-symbolic"));
-        self.placeholder.set_title("Impossibile aprire il messaggio");
+        self.placeholder.set_title(t("Impossibile aprire il messaggio"));
         self.placeholder.set_description(Some(&format!("{context}: {detail}")));
         self.stack.set_visible_child_name("empty");
     }
@@ -288,7 +295,7 @@ fn save_attachment(parent: Option<&gtk::Window>, attachment: &crate::model::Atta
     }
 
     let dialog = gtk::FileDialog::builder()
-        .title(format!("Salva {}", attachment.filename))
+        .title(t1("Salva {}", &attachment.filename))
         .initial_name(&attachment.filename)
         .modal(true)
         .build();

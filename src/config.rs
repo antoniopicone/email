@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::t;
 use crate::model::{Account, AccountSource};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,22 +116,22 @@ impl MessageAppearance {
 
     pub fn label(&self) -> &'static str {
         match self {
-            MessageAppearance::AdaptText => "Adatta il testo",
-            MessageAppearance::AdaptBackground => "Adatta lo sfondo",
-            MessageAppearance::AcceptSenderFormat => "Mantieni il formato del mittente",
+            MessageAppearance::AdaptText => t("Adatta il testo"),
+            MessageAppearance::AdaptBackground => t("Adatta lo sfondo"),
+            MessageAppearance::AcceptSenderFormat => t("Mantieni il formato del mittente"),
         }
     }
 
     pub fn subtitle(&self) -> &'static str {
         match self {
             MessageAppearance::AdaptText => {
-                "Il testo resta leggibile, lo sfondo è quello del messaggio"
+                t("Il testo resta leggibile, lo sfondo è quello del messaggio")
             }
             MessageAppearance::AdaptBackground => {
-                "Lo sfondo segue il tema, i colori del testo restano quelli del mittente"
+                t("Lo sfondo segue il tema, i colori del testo restano quelli del mittente")
             }
             MessageAppearance::AcceptSenderFormat => {
-                "Il messaggio viene mostrato esattamente come inviato"
+                t("Il messaggio viene mostrato esattamente come inviato")
             }
         }
     }
@@ -176,13 +177,13 @@ impl SendDelay {
 
     pub fn label(&self) -> &'static str {
         match self {
-            SendDelay::Off => "Disattivato (invio immediato)",
-            SendDelay::Seconds5 => "5 secondi",
-            SendDelay::Seconds10 => "10 secondi",
-            SendDelay::Seconds30 => "30 secondi",
-            SendDelay::Minutes1 => "1 minuto",
-            SendDelay::Minutes2 => "2 minuti",
-            SendDelay::Minutes5 => "5 minuti",
+            SendDelay::Off => t("Disattivato (invio immediato)"),
+            SendDelay::Seconds5 => t("5 secondi"),
+            SendDelay::Seconds10 => t("10 secondi"),
+            SendDelay::Seconds30 => t("30 secondi"),
+            SendDelay::Minutes1 => t("1 minuto"),
+            SendDelay::Minutes2 => t("2 minuti"),
+            SendDelay::Minutes5 => t("5 minuti"),
         }
     }
 }
@@ -206,11 +207,11 @@ impl OfflineWindow {
 
     pub fn label(&self) -> &'static str {
         match self {
-            OfflineWindow::Nothing => "Nessuno",
-            OfflineWindow::LastWeek => "Ultima settimana",
-            OfflineWindow::LastMonth => "Ultimo mese",
-            OfflineWindow::LastYear => "Ultimo anno",
-            OfflineWindow::Everything => "Tutti i messaggi",
+            OfflineWindow::Nothing => t("Nessuno"),
+            OfflineWindow::LastWeek => t("Ultima settimana"),
+            OfflineWindow::LastMonth => t("Ultimo mese"),
+            OfflineWindow::LastYear => t("Ultimo anno"),
+            OfflineWindow::Everything => t("Tutti i messaggi"),
         }
     }
 

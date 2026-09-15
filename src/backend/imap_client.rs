@@ -177,14 +177,44 @@ impl ImapClient {
     }
 
     /// STATUS is cheap and does not disturb the selected mailbox.
+    /// (unread, total) for one folder.
+    ///
+    /// The `imap` crate parses a `STATUS` reply correctly at the wire level,
+    /// but its `Mailbox::exists`/`::unseen` fields only ever come from the
+    /// untagged responses `SELECT`/`EXAMINE` send (`* n EXISTS`, `* OK
+    /// [UNSEEN n]`). A bare `STATUS` command's `* STATUS "mbox" (MESSAGES n
+    /// UNSEEN n)` line takes a different shape on the wire, which the crate
+    /// treats as an *unsolicited* update and only ever forwards to
+    /// `Session::unsolicited_responses` — so `status()` itself always hands
+    /// back an untouched, all-zero default `Mailbox`. The real numbers are
+    /// sitting in that channel; read them back out of it instead.
     fn folder_counts(&mut self, path: &str) -> (u32, u32) {
-        match self.session.status(path, "(MESSAGES UNSEEN)") {
-            Ok(status) => (status.unseen.unwrap_or(0), status.exists),
-            Err(e) => {
-                log::debug!("STATUS failed for {path}: {e}");
-                (0, 0)
-            }
+        if let Err(e) = self.session.status(path, "(MESSAGES UNSEEN)") {
+            log::debug!("STATUS failed for {path}: {e}");
+            return (0, 0);
         }
+
+        while let Ok(response) = self.session.unsolicited_responses.try_recv() {
+            let imap::types::UnsolicitedResponse::Status { mailbox, attributes } = response else {
+                continue;
+            };
+            if mailbox != path {
+                continue;
+            }
+            let mut unseen = 0;
+            let mut total = 0;
+            for attribute in attributes {
+                match attribute {
+                    imap::types::StatusAttribute::Unseen(n) => unseen = n,
+                    imap::types::StatusAttribute::Messages(n) => total = n,
+                    _ => {}
+                }
+            }
+            return (unseen, total);
+        }
+
+        log::debug!("STATUS for {path} produced no status data");
+        (0, 0)
     }
 
     /// Always re-issues SELECT, even when `mailbox` is already open.
@@ -426,20 +456,33 @@ impl ImapClient {
     /// Servers do not do this for us, and a sent message that only exists in
     /// the recipient's mailbox is a surprising thing to hand a user.
     pub fn append_to_sent(&mut self, raw: &[u8]) -> Result<()> {
-        let sent = self
+        self.append_to(MailboxKind::Sent, raw, &[imap::types::Flag::Seen])
+    }
+
+    /// Save a message to the Drafts folder.
+    pub fn append_to_drafts(&mut self, raw: &[u8]) -> Result<()> {
+        self.append_to(
+            MailboxKind::Drafts,
+            raw,
+            &[imap::types::Flag::Draft, imap::types::Flag::Seen],
+        )
+    }
+
+    fn append_to(&mut self, kind: MailboxKind, raw: &[u8], flags: &[imap::types::Flag]) -> Result<()> {
+        let folder = self
             .list_mailboxes()?
             .into_iter()
-            .find(|m| m.kind == MailboxKind::Sent)
+            .find(|m| m.kind == kind)
             .map(|m| m.path);
 
-        let Some(sent) = sent else {
-            log::info!("no Sent folder on this account, skipping the copy");
+        let Some(folder) = folder else {
+            log::info!("no {kind:?} folder on this account, skipping the copy");
             return Ok(());
         };
 
         self.session
-            .append_with_flags(&sent, raw, &[imap::types::Flag::Seen])
-            .with_context(|| format!("appending the sent copy to {sent}"))?;
+            .append_with_flags(&folder, raw, flags)
+            .with_context(|| format!("appending to {folder}"))?;
 
         Ok(())
     }
@@ -519,18 +562,15 @@ fn parse_rfc2822(value: &str) -> Option<chrono::DateTime<Local>> {
 /// Turn the first kilobyte of a raw body into a one-line list preview.
 fn snippet_from_partial_body(raw: &[u8]) -> String {
     let text = String::from_utf8_lossy(raw);
+    let body = skip_mime_preamble(&text);
 
-    // The partial fetch starts at the body of the first MIME part, which may
-    // still carry part headers; drop everything up to the first blank line.
-    let body = match text.find("\r\n\r\n") {
-        Some(idx) => &text[idx + 4..],
-        None => match text.find("\n\n") {
-            Some(idx) => &text[idx + 2..],
-            None => text.as_ref(),
-        },
+    let decoded = if looks_like_base64(body) {
+        decode_partial_base64(body)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|| decode_quoted_printable(body))
+    } else {
+        decode_quoted_printable(body)
     };
-
-    let decoded = decode_quoted_printable(body);
     let stripped = crate::html::to_plain_text(&decoded);
 
     stripped
@@ -542,12 +582,61 @@ fn snippet_from_partial_body(raw: &[u8]) -> String {
         .collect()
 }
 
+/// A partial `BODY[TEXT]` fetch starts at the MIME preamble, not at a leaf
+/// part's actual content. A single top-level blank-line skip is only enough
+/// for a flat message: a *nested* multipart (e.g. `multipart/mixed` wrapping
+/// a `multipart/alternative`) has several `--boundary` + part-header blocks
+/// stacked up, each ending at its own blank line, before real text starts —
+/// so this walks past as many of those blocks as it finds.
+fn skip_mime_preamble(text: &str) -> &str {
+    let mut rest = text;
+    loop {
+        let trimmed = rest.trim_start_matches(['\r', '\n']);
+        let first_line = trimmed.split(['\r', '\n']).next().unwrap_or("");
+        // "-- " (and bare "--") is the conventional signature delimiter, not
+        // a MIME boundary — never treat it as one, or a real signature line
+        // eats the rest of the preview.
+        let is_boundary = first_line.starts_with("--") && first_line.trim() != "--";
+        let is_header = is_mime_header_line(first_line);
+        if !is_boundary && !is_header {
+            return rest;
+        }
+        match find_blank_line(trimmed) {
+            Some(idx) => rest = &trimmed[idx..],
+            None => return rest,
+        }
+    }
+}
+
+fn find_blank_line(text: &str) -> Option<usize> {
+    if let Some(idx) = text.find("\r\n\r\n") {
+        Some(idx + 4)
+    } else {
+        text.find("\n\n").map(|idx| idx + 2)
+    }
+}
+
+fn is_mime_header_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("content-type:")
+        || lower.starts_with("content-transfer-encoding:")
+        || lower.starts_with("content-disposition:")
+        || lower.starts_with("mime-version:")
+}
+
 /// A forgiving quoted-printable decoder for preview text only.
+///
+/// Decodes into raw bytes and only turns those into a `String` right at the
+/// end. A non-ASCII character is `=XX=YY=ZZ` — three escapes forming one
+/// multi-byte UTF-8 sequence — so casting each decoded byte to `char` as it
+/// comes off (the previous version did exactly that) reads each byte as its
+/// own Latin-1 codepoint and mangles every accented letter and emoji into
+/// mojibake instead of reassembling them.
 fn decode_quoted_printable(input: &str) -> String {
     if !input.contains('=') {
         return input.to_string();
     }
-    let mut out = String::with_capacity(input.len());
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -558,15 +647,37 @@ fn decode_quoted_printable(input: &str) -> String {
                 continue;
             }
             if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                out.push(byte as char);
+                out.push(byte);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A partial fetch has no way to ask the server to decode
+/// Content-Transfer-Encoding for us, so base64 has to be guessed from the
+/// bytes — its alphabet is distinctive enough that plain text essentially
+/// never matches it by chance.
+fn looks_like_base64(text: &str) -> bool {
+    let stripped: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    stripped.len() >= 8 && stripped.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+}
+
+/// Decode as much base64 as divides evenly into 4-character groups — a
+/// partial fetch is cut off at an arbitrary byte, so the tail past the last
+/// full group is dropped rather than treated as a decode failure.
+fn decode_partial_base64(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let stripped: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let usable_len = (stripped.len() / 4) * 4;
+    if usable_len == 0 {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD.decode(&stripped[..usable_len]).ok()
 }
 
 /// Walk a BODYSTRUCTURE looking for a part with a filename or an
@@ -613,6 +724,88 @@ pub fn resolve_credentials(
             Ok(Credentials::Password(password))
         }
         AccountSource::Demo => Err(anyhow!("demo accounts do not connect to a server")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn quoted_printable_reassembles_multibyte_utf8() {
+        // è as =C3=A8 (two escapes, one 2-byte UTF-8 character) — decoding
+        // byte-by-byte into `char` would turn this into two Latin-1
+        // characters (Ã¨) instead of one correct one.
+        assert_eq!(decode_quoted_printable("caff=C3=A8"), "caffè");
+        // 👤 as =F0=9F=91=A4 (four escapes, one 4-byte UTF-8 character).
+        assert_eq!(decode_quoted_printable("=F0=9F=91=A4 Ilaria"), "👤 Ilaria");
+    }
+
+    #[test]
+    fn quoted_printable_leaves_plain_ascii_alone() {
+        assert_eq!(decode_quoted_printable("hello world"), "hello world");
+    }
+
+    #[test]
+    fn recognises_base64_alphabet() {
+        assert!(looks_like_base64("DQpQaG90b2dyYXBoIG9mIEFuZHJlYQ=="));
+        assert!(!looks_like_base64("Ciao, come stai oggi?"));
+        assert!(!looks_like_base64("short"));
+    }
+
+    #[test]
+    fn decodes_a_base64_prefix_even_when_truncated_mid_group() {
+        // "Hello, world!" is 13 bytes -> 20 base64 chars incl. padding;
+        // chop it well short of a 4-char boundary, the way a 1KB partial
+        // IMAP fetch would land mid-stream.
+        let full = base64::engine::general_purpose::STANDARD.encode("Hello, world!");
+        let truncated = &full[..full.len() - 3];
+        let decoded = decode_partial_base64(truncated).expect("should decode the whole groups");
+        assert_eq!(String::from_utf8_lossy(&decoded), "Hello, world");
+    }
+
+    #[test]
+    fn snippet_decodes_base64_body() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode("Ciao a tutti, come va?");
+        let raw = format!("Content-Type: text/plain\r\n\r\n{encoded}");
+        assert_eq!(snippet_from_partial_body(raw.as_bytes()), "Ciao a tutti, come va?");
+    }
+
+    #[test]
+    fn snippet_decodes_quoted_printable_body_with_accents() {
+        let raw = b"Content-Type: text/plain\r\n\r\nCiao, tutto bene? Un caff=C3=A8 con te?";
+        assert_eq!(snippet_from_partial_body(raw), "Ciao, tutto bene? Un caffè con te?");
+    }
+
+    #[test]
+    fn snippet_skips_nested_multipart_boundaries_and_headers() {
+        // multipart/mixed wrapping a multipart/alternative — the shape of the
+        // real promotional email that leaked its MIME boundary line and part
+        // headers into the list preview ("--TKcJI7Jo1M9w=_? Content-Type:
+        // text/plain; charset=\"utf-8\" Content-Transfer-Encoding: 8bit Live
+        // Na...").
+        let raw = concat!(
+            "--outerBoundary\r\n",
+            "Content-Type: multipart/alternative; boundary=\"innerBoundary\"\r\n",
+            "\r\n",
+            "--innerBoundary\r\n",
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n",
+            "Content-Transfer-Encoding: 8bit\r\n",
+            "\r\n",
+            "Live Nation presents Oasis, live on stage.",
+        );
+        assert_eq!(
+            snippet_from_partial_body(raw.as_bytes()),
+            "Live Nation presents Oasis, live on stage."
+        );
+    }
+
+    #[test]
+    fn snippet_preview_does_not_eat_a_signature_delimiter() {
+        let raw = b"Content-Type: text/plain\r\n\r\nCiao!\r\n-- \r\nInviato dal mio iPhone";
+        let snippet = snippet_from_partial_body(raw);
+        assert!(snippet.starts_with("Ciao!"), "signature delimiter ate the real content: {snippet}");
     }
 }
 

@@ -43,17 +43,38 @@ pub fn parse_recipients(list: &str) -> Result<Vec<LettreMailbox>> {
 }
 
 /// Build the RFC 5322 message. Returned separately from sending so the caller
-/// can also append a copy to the Sent folder.
+/// can also append a copy to the Sent folder. At least one recipient is
+/// required — use [`build_draft`] for a message that may not have one yet.
 pub fn build(account: &Account, outgoing: &Outgoing) -> Result<LettreMessage> {
+    let to = parse_recipients(&outgoing.to)?;
+    if to.is_empty() {
+        return Err(anyhow!("indica almeno un destinatario"));
+    }
+    build_message(account, outgoing)
+}
+
+/// Build a message for the Drafts folder: same as [`build`], but a draft is
+/// allowed to have no recipients yet — the user may still be writing it.
+/// RFC 5322 still wants *a* recipient header, so an entirely empty one
+/// stands in for itself; it is never actually sent anywhere.
+pub fn build_draft(account: &Account, outgoing: &Outgoing) -> Result<LettreMessage> {
+    let no_recipients = [&outgoing.to, &outgoing.cc, &outgoing.bcc]
+        .iter()
+        .all(|field| field.trim().is_empty());
+    if no_recipients {
+        let placeholder = Outgoing { to: account.email.clone(), ..outgoing.clone() };
+        return build_message(account, &placeholder);
+    }
+    build_message(account, outgoing)
+}
+
+fn build_message(account: &Account, outgoing: &Outgoing) -> Result<LettreMessage> {
     let from: LettreMailbox = format!("{} <{}>", account.display_name, account.email)
         .parse()
         .or_else(|_| account.email.parse())
         .with_context(|| format!("indirizzo mittente non valido: {}", account.email))?;
 
     let to = parse_recipients(&outgoing.to)?;
-    if to.is_empty() {
-        return Err(anyhow!("indica almeno un destinatario"));
-    }
     let cc = parse_recipients(&outgoing.cc)?;
     let bcc = parse_recipients(&outgoing.bcc)?;
 
@@ -143,5 +164,30 @@ mod tests {
     #[test]
     fn rejects_malformed_addresses() {
         assert!(parse_recipients("non-un-indirizzo").is_err());
+    }
+
+    #[test]
+    fn draft_does_not_need_a_recipient_yet() {
+        let account = crate::model::Account {
+            id: "a".into(),
+            display_name: "Prova".into(),
+            email: "prova@example.com".into(),
+            imap_host: String::new(),
+            imap_port: 993,
+            imap_user: String::new(),
+            use_starttls: false,
+            smtp_host: String::new(),
+            smtp_port: 587,
+            smtp_user: String::new(),
+            source: crate::model::AccountSource::Manual,
+            goa_path: None,
+        };
+        let outgoing =
+            Outgoing { subject: "Bozza".into(), body: "Ancora da finire".into(), ..Default::default() };
+
+        // The strict path used for an actual send refuses this…
+        assert!(build(&account, &outgoing).is_err());
+        // …but a draft is allowed to sit half-written, with no recipient set.
+        assert!(build_draft(&account, &outgoing).is_ok());
     }
 }

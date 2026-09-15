@@ -58,8 +58,16 @@ fn defer_remote_images(html: &str) -> String {
 
 /// Restore the `src` neutralised by [`sanitize`], so the images actually
 /// load — called at render time once remote content is allowed.
+///
+/// The two markers are handled independently rather than as one glued-together
+/// string: ammonia (and the attribute order in the original mail) does not
+/// guarantee `data-blocked` sits directly next to `data-remote-src`, and a
+/// leftover `data-blocked` attribute keeps the `img[data-blocked]` placeholder
+/// CSS active even once `src` has been restored.
 pub fn allow_remote_images(html: &str) -> String {
-    html.replace("data-blocked=\"1\" data-remote-src=", "src=")
+    html.replace("data-remote-src=", "src=")
+        .replace("data-blocked=\"1\" ", "")
+        .replace("data-blocked=\"1\"", "")
 }
 
 fn default_tags() -> HashSet<&'static str> {
@@ -360,6 +368,23 @@ mod tests {
         let restored = allow_remote_images(&clean);
         assert!(restored.contains("src=\"https://evil.example/pixel.gif\""));
         assert!(!restored.contains("data-remote-src="));
+        assert!(!restored.contains("data-blocked"));
+    }
+
+    #[test]
+    fn restores_images_even_when_alt_sits_before_src() {
+        // Attribute order in the wild (and after ammonia's own serialisation)
+        // is not guaranteed to put `src` first, so the marker attribute
+        // (`data-blocked`) can end up separated from `data-remote-src` by
+        // other attributes in between.
+        let clean = r#"<img data-blocked="1" alt="promo" width="600" data-remote-src="https://example.com/banner.png">"#;
+        let restored = allow_remote_images(clean);
+        assert!(
+            restored.contains(r#"src="https://example.com/banner.png""#),
+            "src was not restored: {restored}"
+        );
+        assert!(!restored.contains("data-blocked"), "placeholder marker left behind: {restored}");
+        assert!(!restored.contains("data-remote-src"));
     }
 
     #[test]

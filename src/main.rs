@@ -8,6 +8,7 @@ mod contacts;
 mod demo;
 mod goa;
 mod html;
+mod i18n;
 mod model;
 mod runtime;
 mod secrets;
@@ -114,6 +115,8 @@ fn main() -> glib::ExitCode {
         env_logger::Env::default().default_filter_or("mailview=info,warn"),
     )
     .init();
+
+    i18n::init();
 
     let options = parse_options();
     let config = Config::load();

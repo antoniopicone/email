@@ -28,6 +28,7 @@ pub enum Command {
     MoveMessage { mailbox: String, uid: u32, target: String },
     DeleteMessage { mailbox: String, uid: u32 },
     Send { outgoing: smtp::Outgoing },
+    SaveDraft { outgoing: smtp::Outgoing },
     Shutdown,
 }
 
@@ -54,6 +55,7 @@ pub enum Event {
     FlagChanged { account_id: String, mailbox: String, uid: u32, flag: String, on: bool },
     MessageRemoved { account_id: String, mailbox: String, uid: u32 },
     Sent { account_id: String },
+    DraftSaved { account_id: String },
     Error { account_id: String, context: String, detail: String },
 }
 
@@ -309,6 +311,13 @@ fn handle_command(
             Ok(())
         }
 
+        Command::SaveDraft { outgoing } => {
+            let message = smtp::build_draft(account, outgoing)?;
+            session.append_to_drafts(&message.formatted())?;
+            emit(Event::DraftSaved { account_id: account.id.clone() });
+            Ok(())
+        }
+
         Command::DeleteMessage { mailbox, uid } => {
             // Prefer moving to Trash; only fall back to a hard delete when the
             // server has no trash folder at all.
@@ -339,6 +348,7 @@ fn describe(command: &Command) -> String {
         Command::MoveMessage { target, .. } => format!("spostamento in {target}"),
         Command::DeleteMessage { .. } => "eliminazione del messaggio".into(),
         Command::Send { .. } => "invio del messaggio".into(),
+        Command::SaveDraft { .. } => "salvataggio della bozza".into(),
         Command::Shutdown => "chiusura".into(),
     }
 }

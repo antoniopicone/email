@@ -4,6 +4,21 @@
  * the system light/dark preference without a second dark-mode stylesheet.
  */
 
+/* ----------------------------------------------------------- context menu */
+
+.context-menu {
+  min-width: 200px;
+}
+
+.context-menu button.flat {
+  border-radius: 0;
+  padding: 6px 14px;
+}
+
+.context-menu button.flat:hover {
+  background: alpha(currentColor, 0.08);
+}
+
 /* ---------------------------------------------------------------- sidebar */
 
 .mail-sidebar {
@@ -283,6 +298,20 @@ button.compose-field:hover {
   background: alpha(currentColor, 0.09);
 }
 
+/* A recipient field mid-typing an address that does not parse yet — an
+ * amber dashed outline, not GTK's semantic ".error" red, which reads as
+ * "you did something wrong" rather than "still typing". */
+entry.compose-field.recipient-pending {
+  outline: 1.5px dashed alpha(@warning_color, 0.7);
+  outline-offset: -1.5px;
+}
+
+/* The contact-suggestion popover: accent-coloured selection, not red. */
+.compose-suggestions row:selected {
+  background: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
 /* --------------------------------------------------------------- status bar */
 
 .mail-status-bar {
@@ -293,4 +322,14 @@ button.compose-field:hover {
 .mail-status-bar spinner {
   min-width: 14px;
   min-height: 14px;
+}
+
+.mail-status-bar button.circular {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0;
+}
+
+.mail-status-bar button.circular image {
+  -gtk-icon-size: 13px;
 }

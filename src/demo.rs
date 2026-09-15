@@ -518,6 +518,10 @@ pub fn run_worker(
 
             // The demo never opens a socket, so a "send" just reports success.
             Command::Send { .. } => emit(Event::Sent { account_id: account.id.clone() }),
+
+            Command::SaveDraft { .. } => {
+                emit(Event::DraftSaved { account_id: account.id.clone() })
+            }
         }
     }
 }

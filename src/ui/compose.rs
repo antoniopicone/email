@@ -1,6 +1,6 @@
 //! The compose window, used for new messages, replies and forwards.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -10,6 +10,7 @@ use libadwaita as adw;
 use adw::prelude::*;
 
 use crate::backend::smtp::{parse_recipients, Outgoing};
+use crate::i18n::{t, t1};
 use crate::model::{Account, Mailaddr, Message};
 
 /// What the user asked for, which decides how the fields are prefilled.
@@ -24,10 +25,10 @@ pub enum ComposeKind {
 impl ComposeKind {
     fn title(&self) -> &'static str {
         match self {
-            ComposeKind::New => "Nuovo messaggio",
-            ComposeKind::Reply => "Rispondi",
-            ComposeKind::ReplyAll => "Rispondi a tutti",
-            ComposeKind::Forward => "Inoltra",
+            ComposeKind::New => t("Nuovo messaggio"),
+            ComposeKind::Reply => t("Rispondi"),
+            ComposeKind::ReplyAll => t("Rispondi a tutti"),
+            ComposeKind::Forward => t("Inoltra"),
         }
     }
 }
@@ -172,18 +173,27 @@ fn setup_recipient_field(row: &gtk::Entry, contacts: &Rc<RefCell<Vec<Mailaddr>>>
         row.connect_changed(move |row| {
             let valid = row.text().trim().is_empty() || parse_recipients(&row.text()).is_ok();
             if valid {
-                row.remove_css_class("error");
+                row.remove_css_class("recipient-pending");
             } else {
-                row.add_css_class("error");
+                row.add_css_class("recipient-pending");
             }
         });
     }
 
     // Suggestions, matched against whatever is typed after the last comma.
-    let popover = gtk::Popover::builder().autohide(false).has_arrow(false).build();
+    let popover = gtk::Popover::builder().autohide(true).has_arrow(false).build();
     popover.set_parent(row);
+    // `autohide` is what makes an outside click dismiss the popover, but it
+    // also makes GTK hand keyboard focus to the popover the moment it opens
+    // — straight into the suggestion list, since it's the first focusable
+    // thing inside. That stole every keystroke from the entry the user was
+    // still typing into. Neither the popover nor the list may take focus;
+    // a suggestion is still reachable by clicking it.
+    popover.set_can_focus(false);
     let suggestion_list = gtk::ListBox::new();
     suggestion_list.add_css_class("boxed-list");
+    suggestion_list.add_css_class("compose-suggestions");
+    suggestion_list.set_can_focus(false);
     popover.set_child(Some(&suggestion_list));
 
     {
@@ -256,11 +266,13 @@ fn setup_recipient_field(row: &gtk::Entry, contacts: &Rc<RefCell<Vec<Mailaddr>>>
     }
 }
 
-/// Open the compose window. `on_send` receives the finished message.
-/// `known_contacts` seeds the suggestion popovers with addresses already
-/// seen in loaded mail; GNOME's local address book, when reachable, is
-/// merged in shortly after the window opens.
-pub fn open<F>(
+/// Open the compose window. `on_send` receives the finished message;
+/// `on_save_draft` is called instead when the user closes the window with
+/// unsent changes and chooses to keep them. `known_contacts` seeds the
+/// suggestion popovers with addresses already seen in loaded mail; GNOME's
+/// local address book, when reachable, is merged in shortly after the
+/// window opens.
+pub fn open<F, S>(
     parent: &impl IsA<gtk::Window>,
     kind: ComposeKind,
     accounts: &[Account],
@@ -268,9 +280,12 @@ pub fn open<F>(
     prefilled: Outgoing,
     known_contacts: Vec<Mailaddr>,
     on_send: F,
+    on_save_draft: S,
 ) where
     F: Fn(Account, Outgoing) + 'static,
+    S: Fn(Account, Outgoing) + 'static,
 {
+    let initial = prefilled.clone();
     let window = adw::Window::builder()
         .transient_for(parent)
         .modal(false)
@@ -350,7 +365,7 @@ pub fn open<F>(
         });
     }
 
-    let from_row = field_row("Da", &captions, &from_button);
+    let from_row = field_row(t("Da"), &captions, &from_button);
 
     let to_entry = gtk::Entry::builder().css_classes(["compose-field"]).build();
     to_entry.set_text(&prefilled.to);
@@ -365,12 +380,12 @@ pub fn open<F>(
         .css_classes(["flat"])
         .build();
     let bcc_toggle = gtk::ToggleButton::builder()
-        .label("Ccn")
+        .label(t("Ccn"))
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
         .build();
 
-    let to_row = field_row("A", &captions, &to_entry);
+    let to_row = field_row(t("A"), &captions, &to_entry);
     to_row.append(&cc_toggle);
     to_row.append(&bcc_toggle);
 
@@ -386,7 +401,7 @@ pub fn open<F>(
 
     let bcc_entry = gtk::Entry::builder().css_classes(["compose-field"]).build();
     setup_recipient_field(&bcc_entry, &contacts);
-    let bcc_row = field_row("Ccn", &captions, &bcc_entry);
+    let bcc_row = field_row(t("Ccn"), &captions, &bcc_entry);
     bcc_row.set_visible(false);
     {
         let bcc_row = bcc_row.clone();
@@ -395,7 +410,7 @@ pub fn open<F>(
 
     let subject_entry = gtk::Entry::builder().css_classes(["compose-field"]).build();
     subject_entry.set_text(&prefilled.subject);
-    let subject_row = field_row("Oggetto", &captions, &subject_entry);
+    let subject_row = field_row(t("Oggetto"), &captions, &subject_entry);
 
     let fields = gtk::Box::new(gtk::Orientation::Vertical, 8);
     fields.append(&from_row);
@@ -423,10 +438,10 @@ pub fn open<F>(
         .child(&body)
         .build();
 
-    let send_button = gtk::Button::builder().label("Invia").build();
+    let send_button = gtk::Button::builder().label(t("Invia")).build();
     send_button.add_css_class("suggested-action");
 
-    let cancel_button = gtk::Button::builder().label("Annulla").build();
+    let cancel_button = gtk::Button::builder().label(t("Annulla")).build();
 
     let window_title = adw::WindowTitle::new(kind.title(), &default_account.email);
     let header = adw::HeaderBar::new();
@@ -474,46 +489,110 @@ pub fn open<F>(
         cancel_button.connect_clicked(move |_| window.close());
     }
 
-    {
-        let window = window.clone();
+    // Gathers the current field contents into an `Outgoing`, reused by the
+    // send handler and by the close-confirmation dialog alike.
+    let gather_outgoing: Rc<dyn Fn() -> Outgoing> = {
         let to_entry = to_entry.clone();
         let cc_entry = cc_entry.clone();
         let bcc_entry = bcc_entry.clone();
         let subject_entry = subject_entry.clone();
         let body = body.clone();
         let in_reply_to = prefilled.in_reply_to.clone();
-        let toast_overlay = toast_overlay.clone();
-        let selected_account = selected_account.clone();
-
-        send_button.connect_clicked(move |_| {
+        Rc::new(move || {
             let buffer = body.buffer();
-            let text = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                .to_string();
-
-            let outgoing = Outgoing {
+            let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
+            Outgoing {
                 to: to_entry.text().to_string(),
                 cc: cc_entry.text().to_string(),
                 bcc: bcc_entry.text().to_string(),
                 subject: subject_entry.text().to_string(),
                 body: text,
                 in_reply_to: in_reply_to.clone(),
-            };
+            }
+        })
+    };
+
+    // Set right before a deliberate `window.close()` so the close-request
+    // handler below lets it through without asking again — once for a
+    // successful send, once for either answer in the draft dialog.
+    let force_close = Rc::new(Cell::new(false));
+
+    {
+        let window = window.clone();
+        let force_close = force_close.clone();
+        let gather_outgoing = gather_outgoing.clone();
+        let selected_account = selected_account.clone();
+        let on_save_draft = Rc::new(on_save_draft);
+        window.connect_close_request(move |window| {
+            let unsent = gather_outgoing();
+            let unchanged = unsent.to == initial.to
+                && unsent.cc == initial.cc
+                && unsent.bcc == initial.bcc
+                && unsent.subject == initial.subject
+                && unsent.body == initial.body;
+            if force_close.get() || unchanged {
+                return glib::Propagation::Proceed;
+            }
+
+            let dialog = adw::AlertDialog::new(
+                Some(t("Salvare la bozza?")),
+                Some(t("Il messaggio non è stato inviato.")),
+            );
+            dialog.add_response("cancel", t("Annulla"));
+            dialog.add_response("discard", t("Non salvare"));
+            dialog.add_response("save", t("Salva bozza"));
+            dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+            dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("save"));
+            dialog.set_close_response("cancel");
+
+            let window_owned = window.clone();
+            let force_close = force_close.clone();
+            let gather_outgoing = gather_outgoing.clone();
+            let selected_account = selected_account.clone();
+            let on_save_draft = on_save_draft.clone();
+            dialog.connect_response(None, move |_, response| {
+                match response {
+                    "save" => on_save_draft(selected_account.borrow().clone(), gather_outgoing()),
+                    "discard" => {}
+                    _ => return,
+                }
+                force_close.set(true);
+                window_owned.close();
+            });
+            dialog.present(Some(window));
+            glib::Propagation::Stop
+        });
+    }
+
+    {
+        let window = window.clone();
+        let force_close = force_close.clone();
+        let gather_outgoing = gather_outgoing.clone();
+        let to_entry = to_entry.clone();
+        let cc_entry = cc_entry.clone();
+        let bcc_entry = bcc_entry.clone();
+        let toast_overlay = toast_overlay.clone();
+        let selected_account = selected_account.clone();
+
+        send_button.connect_clicked(move |_| {
+            let outgoing = gather_outgoing();
 
             if outgoing.to.trim().is_empty() {
-                toast_overlay.add_toast(adw::Toast::new("Indica almeno un destinatario"));
+                toast_overlay.add_toast(adw::Toast::new(t("Indica almeno un destinatario")));
                 to_entry.grab_focus();
                 return;
             }
 
             for (entry, field, label) in [
-                (&to_entry, &outgoing.to, "A"),
+                (&to_entry, &outgoing.to, t("A")),
                 (&cc_entry, &outgoing.cc, "Cc"),
-                (&bcc_entry, &outgoing.bcc, "Ccn"),
+                (&bcc_entry, &outgoing.bcc, t("Ccn")),
             ] {
                 if !field.trim().is_empty() && parse_recipients(field).is_err() {
-                    toast_overlay.add_toast(adw::Toast::new(&format!(
-                        "Controlla gli indirizzi nel campo {label}"
+                    toast_overlay.add_toast(adw::Toast::new(&t1(
+                        "Controlla gli indirizzi nel campo {}",
+                        label,
                     )));
                     entry.grab_focus();
                     return;
@@ -521,6 +600,7 @@ pub fn open<F>(
             }
 
             on_send(selected_account.borrow().clone(), outgoing);
+            force_close.set(true);
             window.close();
         });
     }

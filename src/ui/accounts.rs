@@ -11,6 +11,7 @@ use libadwaita as adw;
 use adw::prelude::*;
 
 use crate::config::ManualAccount;
+use crate::i18n::t;
 
 /// Guess sensible server settings from the address' domain, the way most mail
 /// clients do, so the common cases need almost no typing.
@@ -48,36 +49,36 @@ where
     let window = adw::Window::builder()
         .transient_for(parent)
         .modal(true)
-        .title("Aggiungi account")
+        .title(t("Aggiungi account"))
         .default_width(520)
         .default_height(640)
         .build();
 
-    let name_row = entry_row("Nome visualizzato", "");
-    let email_row = entry_row("Indirizzo e-mail", "");
-    let password_row = adw::PasswordEntryRow::builder().title("Password").build();
+    let name_row = entry_row(t("Nome visualizzato"), "");
+    let email_row = entry_row(t("Indirizzo e-mail"), "");
+    let password_row = adw::PasswordEntryRow::builder().title(t("Password")).build();
 
-    let identity = adw::PreferencesGroup::builder().title("Identità").build();
+    let identity = adw::PreferencesGroup::builder().title(t("Identità")).build();
     identity.add(&name_row);
     identity.add(&email_row);
     identity.add(&password_row);
 
-    let imap_host_row = entry_row("Server IMAP", "");
-    let imap_port_row = entry_row("Porta IMAP", "993");
+    let imap_host_row = entry_row(t("Server IMAP"), "");
+    let imap_port_row = entry_row(t("Porta IMAP"), "993");
     let starttls_row = adw::SwitchRow::builder()
-        .title("Usa STARTTLS")
-        .subtitle("Attiva per i server sulla porta 143; lascia disattivo per la 993")
+        .title(t("Usa STARTTLS"))
+        .subtitle(t("Attiva per i server sulla porta 143; lascia disattivo per la 993"))
         .build();
 
-    let incoming = adw::PreferencesGroup::builder().title("Posta in arrivo").build();
+    let incoming = adw::PreferencesGroup::builder().title(t("Posta in arrivo")).build();
     incoming.add(&imap_host_row);
     incoming.add(&imap_port_row);
     incoming.add(&starttls_row);
 
-    let smtp_host_row = entry_row("Server SMTP", "");
-    let smtp_port_row = entry_row("Porta SMTP", "587");
+    let smtp_host_row = entry_row(t("Server SMTP"), "");
+    let smtp_port_row = entry_row(t("Porta SMTP"), "587");
 
-    let outgoing = adw::PreferencesGroup::builder().title("Posta in uscita").build();
+    let outgoing = adw::PreferencesGroup::builder().title(t("Posta in uscita")).build();
     outgoing.add(&smtp_host_row);
     outgoing.add(&smtp_port_row);
 
@@ -96,12 +97,12 @@ where
         });
     }
 
-    let save_button = gtk::Button::builder().label("Aggiungi").build();
+    let save_button = gtk::Button::builder().label(t("Aggiungi")).build();
     save_button.add_css_class("suggested-action");
-    let cancel_button = gtk::Button::builder().label("Annulla").build();
+    let cancel_button = gtk::Button::builder().label(t("Annulla")).build();
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("Aggiungi account", "IMAP")));
+    header.set_title_widget(Some(&adw::WindowTitle::new(t("Aggiungi account"), "IMAP")));
     header.pack_start(&cancel_button);
     header.pack_end(&save_button);
 
@@ -142,15 +143,15 @@ where
             };
 
             if !email.contains('@') {
-                complain("Inserisci un indirizzo e-mail valido");
+                complain(t("Inserisci un indirizzo e-mail valido"));
                 return;
             }
             if imap_host.is_empty() {
-                complain("Indica il server IMAP");
+                complain(t("Indica il server IMAP"));
                 return;
             }
             if password.is_empty() {
-                complain("Inserisci la password");
+                complain(t("Inserisci la password"));
                 return;
             }
 

@@ -7,6 +7,7 @@ use gtk::prelude::*;
 use libadwaita as adw;
 use adw::prelude::*;
 
+use crate::i18n::{plural, t, t1};
 use crate::model::{Mailbox, MessageSummary};
 
 /// The four quick actions reachable on a message row, either by dragging it
@@ -80,12 +81,12 @@ fn attach_swipe_actions(
 /// The "modal window" alternative to swiping: press and hold a row to see
 /// the same four actions as buttons.
 fn show_action_sheet(row: &gtk::ListBoxRow, on_action: Rc<dyn Fn(SwipeAction)>) {
-    let dialog = adw::AlertDialog::new(Some("Azioni sul messaggio"), None);
-    dialog.add_response("toggle-read", "Segna come letto/da leggere");
-    dialog.add_response("flag", "Contrassegna");
-    dialog.add_response("archive", "Archivia");
-    dialog.add_response("delete", "Elimina");
-    dialog.add_response("cancel", "Annulla");
+    let dialog = adw::AlertDialog::new(Some(t("Azioni sul messaggio")), None);
+    dialog.add_response("toggle-read", t("Segna come letto/da leggere"));
+    dialog.add_response("flag", t("Contrassegna"));
+    dialog.add_response("archive", t("Archivia"));
+    dialog.add_response("delete", t("Elimina"));
+    dialog.add_response("cancel", t("Annulla"));
     dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
     dialog.set_close_response("cancel");
 
@@ -137,7 +138,7 @@ pub fn section_header(
         let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
         status.append(&icon);
 
-        let label = gtk::Label::new(Some("Errore di connessione"));
+        let label = gtk::Label::new(Some(t("Errore di connessione")));
         label.set_xalign(0.0);
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         status.append(&label);
@@ -189,9 +190,18 @@ pub fn mailbox_row(mailbox: &Mailbox) -> gtk::ListBoxRow {
     }
 
     row.set_tooltip_text(Some(&match (mailbox.total, mailbox.unread) {
-        (0, _) => format!("{} — vuota", mailbox.path),
-        (total, 0) => format!("{} — {total} messaggi", mailbox.path),
-        (total, unread) => format!("{} — {total} messaggi, {unread} da leggere", mailbox.path),
+        (0, _) => t1("{} — vuota", &mailbox.path),
+        (total, 0) => format!(
+            "{} — {total} {}",
+            mailbox.path,
+            plural(total as usize, "messaggio", "messaggi", "message", "messages")
+        ),
+        (total, unread) => format!(
+            "{} — {total} {}, {unread} {}",
+            mailbox.path,
+            plural(total as usize, "messaggio", "messaggi", "message", "messages"),
+            t("da leggere"),
+        ),
     }));
 
     row.set_child(Some(&boxx));
@@ -229,6 +239,35 @@ pub fn smart_row(title: &str, icon_name: &str, unread: u32) -> gtk::ListBoxRow {
     row
 }
 
+/// Handles to the parts of a [`message_row`] that change when the message's
+/// flags change, so a flag update can restyle the row already on screen
+/// instead of tearing down and rebuilding the whole list (which would drop
+/// the current selection and any popover mid-interaction).
+#[derive(Clone)]
+pub struct MessageRowRefs {
+    dot: gtk::Widget,
+    sender: gtk::Label,
+    subject: gtk::Label,
+    flag_icon: gtk::Widget,
+}
+
+/// Reflect a new `seen` state on an already-built row.
+pub fn set_row_seen(refs: &MessageRowRefs, seen: bool) {
+    refs.dot.set_visible(!seen);
+    if seen {
+        refs.sender.remove_css_class("unread");
+        refs.subject.remove_css_class("unread");
+    } else {
+        refs.sender.add_css_class("unread");
+        refs.subject.add_css_class("unread");
+    }
+}
+
+/// Reflect a new `flagged` state on an already-built row.
+pub fn set_row_flagged(refs: &MessageRowRefs, flagged: bool) {
+    refs.flag_icon.set_visible(flagged);
+}
+
 /// `account` labels which account a message came from, shown only in the
 /// unified views where the list mixes several accounts together.
 /// `on_swipe_action` fires when the user swipes the row or picks an action
@@ -237,23 +276,24 @@ pub fn message_row(
     message: &MessageSummary,
     account: Option<&str>,
     on_swipe_action: impl Fn(SwipeAction) + 'static,
-) -> gtk::ListBoxRow {
+) -> (gtk::ListBoxRow, MessageRowRefs) {
     let row = gtk::ListBoxRow::new();
 
     let outer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
 
     // Left gutter: the unread dot, or empty space keeping the text aligned.
+    // Always built (not just when unread) so a later flag change can just
+    // toggle its visibility rather than rebuilding the row.
     let gutter = gtk::Box::new(gtk::Orientation::Vertical, 0);
     gutter.set_size_request(12, -1);
     gutter.set_valign(gtk::Align::Start);
     gutter.set_margin_top(5);
-    if !message.seen {
-        let dot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        dot.add_css_class("unread-dot");
-        dot.set_halign(gtk::Align::Center);
-        dot.set_valign(gtk::Align::Center);
-        gutter.append(&dot);
-    }
+    let dot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    dot.add_css_class("unread-dot");
+    dot.set_halign(gtk::Align::Center);
+    dot.set_valign(gtk::Align::Center);
+    dot.set_visible(!message.seen);
+    gutter.append(&dot);
     outer.append(&gutter);
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -284,12 +324,13 @@ pub fn message_row(
         icon.set_valign(gtk::Align::Center);
         top.append(&icon);
     }
-    if message.flagged {
-        let icon = gtk::Image::from_icon_name("starred-symbolic");
-        icon.add_css_class("msg-flag");
-        icon.set_valign(gtk::Align::Center);
-        top.append(&icon);
-    }
+    // Always built, like the unread dot, so toggling "flagged" later needs
+    // no rebuild.
+    let flag_icon = gtk::Image::from_icon_name("starred-symbolic");
+    flag_icon.add_css_class("msg-flag");
+    flag_icon.set_valign(gtk::Align::Center);
+    flag_icon.set_visible(message.flagged);
+    top.append(&flag_icon);
 
     let date = gtk::Label::new(Some(&message.date_label()));
     date.add_css_class("msg-date");
@@ -342,7 +383,14 @@ pub fn message_row(
     outer.append(&column);
     row.set_child(Some(&outer));
     attach_swipe_actions(&row, outer.upcast_ref(), Rc::new(on_swipe_action));
-    row
+
+    let refs = MessageRowRefs {
+        dot: dot.upcast(),
+        sender,
+        subject,
+        flag_icon: flag_icon.upcast(),
+    };
+    (row, refs)
 }
 
 /// A clickable chip describing one attachment in the reading pane.
@@ -372,7 +420,11 @@ where
     let button = gtk::Button::builder().child(&content).build();
     button.add_css_class("attachment-chip");
     button.add_css_class("flat");
-    button.set_tooltip_text(Some(&format!("Salva “{name}” — {mime_type}, {size}")));
+    let save_label = match crate::i18n::lang() {
+        crate::i18n::Lang::It => format!("Salva “{name}” — {mime_type}, {size}"),
+        crate::i18n::Lang::En => format!("Save “{name}” — {mime_type}, {size}"),
+    };
+    button.set_tooltip_text(Some(&save_label));
     button.connect_clicked(move |_| on_activate());
 
     button.upcast()
